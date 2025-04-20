@@ -3,6 +3,9 @@ import time
 import logging
 import streamlit as st
 import sqlite3
+
+# Set up logging
+logger = logging.getLogger(__name__)
 import sys
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from typing import List, Dict, Any, Optional, Union

@@ -13,7 +13,7 @@ from utils import reset_chroma, verify_chroma_persistence
 
 # Import modules
 from document_processor import PaperManager, process_documents
-from vector_db import initialize_chroma, create_vector_db, check_db_status
+from vector_db import initialize_vector_db, create_vector_db, check_db_status
 from query_processor import query_documents, generate_accuracy_percentage
 from pubmed_downloader import pubmed_downloader_ui
 from prompt_evaluator import prompt_evaluator_ui
