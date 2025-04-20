@@ -1,0 +1,22 @@
+{
+    "GLP-1 AND muscle mass": {
+        "timestamp": "2025-04-19 14:07:38",
+        "found": 5,
+        "downloaded": 5,
+        "filter_open_access": true,
+        "year_range": [
+            2010,
+            2025
+        ]
+    },
+    "GLP-1 AND side effects / GLP-1 AND adverse events": {
+        "timestamp": "2025-04-19 14:32:49",
+        "found": 5,
+        "downloaded": 3,
+        "filter_open_access": true,
+        "year_range": [
+            2010,
+            2023
+        ]
+    }
+}
