@@ -12,10 +12,11 @@ pdfplumber==0.10.4
 chromadb==0.4.22
 
 # LangChain and related packages
-langchain==0.1.4
-langchain-openai==0.0.5
-langchain-community==0.3.21
-langchain-chroma==0.2.2
+# Using compatible versions to avoid dependency conflicts
+langchain>=0.0.267
+langchain-openai>=0.0.2
+langchain-community>=0.0.11,<0.1.0
+langchain-chroma>=0.0.10
 
 # PubMed integration
 biopython==1.83
