@@ -2,8 +2,17 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load environment variables for local development
-load_dotenv()
+# Load environment variables for local development (only if .env file exists)
+try:
+    from pathlib import Path
+    env_path = Path('.') / '.env'
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+    else:
+        print("No .env file found, using Streamlit secrets for configuration")
+except Exception as e:
+    print(f"Could not load .env file: {str(e)}")
+    print("Using Streamlit secrets for configuration")
 
 # Get API keys from environment variables first (highest priority)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
