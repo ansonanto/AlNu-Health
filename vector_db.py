@@ -218,17 +218,61 @@ def initialize_faiss(reset_db=False, embedding_function=None) -> Optional[Any]:
         # Initialize FAISS
         try:
             if faiss_exists:
-                # Load existing index
-                vectorstore = FAISS.load_local(FAISS_PATH, embedding_function, "documents")
-                logger.info("Successfully loaded existing FAISS index")
-                st.session_state.processed_docs = True
-                st.session_state.db_status = "Healthy (FAISS - Loaded from disk)"
+                # Try to load existing index with error handling
+                try:
+                    # First try standard loading method
+                    vectorstore = FAISS.load_local(FAISS_PATH, embedding_function, "documents")
+                    logger.info("Successfully loaded existing FAISS index using standard method")
+                    st.session_state.processed_docs = True
+                    st.session_state.db_status = "Healthy (FAISS - Loaded from disk)"
+                except Exception as e:
+                    logger.warning(f"Standard FAISS loading failed: {str(e)}")
+                    
+                    # Try alternative loading method using pickle
+                    pickle_path = os.path.join(FAISS_PATH, 'index.pickle')
+                    if os.path.exists(pickle_path):
+                        try:
+                            import pickle
+                            with open(pickle_path, 'rb') as f:
+                                vectorstore = pickle.load(f)
+                            logger.info("Successfully loaded existing FAISS index using pickle method")
+                            st.session_state.processed_docs = True
+                            st.session_state.db_status = "Healthy (FAISS - Loaded from pickle)"
+                        except Exception as inner_e:
+                            logger.error(f"Pickle loading failed: {str(inner_e)}")
+                            # Create empty index as fallback
+                            vectorstore = FAISS(embedding_function, [], [], "documents")
+                            logger.warning("Created empty FAISS index as fallback")
+                            st.session_state.processed_docs = False
+                            st.session_state.db_status = "Healthy (FAISS - Empty, loading failed)"
+                    else:
+                        # Create empty index as fallback
+                        vectorstore = FAISS(embedding_function, [], [], "documents")
+                        logger.warning("Created empty FAISS index as fallback (no pickle found)")
+                        st.session_state.processed_docs = False
+                        st.session_state.db_status = "Healthy (FAISS - Empty, loading failed)"
             else:
                 # Create empty index (will be populated later)
                 vectorstore = FAISS(embedding_function, [], [], "documents")
                 os.makedirs(FAISS_PATH, exist_ok=True)
-                vectorstore.save_local(FAISS_PATH)
-                logger.info("Successfully initialized empty FAISS index")
+                
+                # Try to save the empty index with error handling
+                try:
+                    vectorstore.save_local(FAISS_PATH)
+                    logger.info("Successfully initialized and saved empty FAISS index")
+                except TypeError as e:
+                    # Handle the argument error for older FAISS versions
+                    logger.warning(f"Using alternative save method for empty index due to: {str(e)}")
+                    try:
+                        # Try saving with a different method
+                        import pickle
+                        with open(os.path.join(FAISS_PATH, 'index.pickle'), 'wb') as f:
+                            pickle.dump(vectorstore, f)
+                        logger.info("Successfully saved empty FAISS index using pickle method")
+                    except Exception as inner_e:
+                        logger.error(f"Failed to save empty FAISS index with alternative method: {str(inner_e)}")
+                        # Continue anyway since we have the in-memory instance
+                
                 st.session_state.processed_docs = False
                 st.session_state.db_status = "Healthy (FAISS - Empty)"
             
@@ -282,9 +326,21 @@ def create_faiss_db(documents, update_existing=False):
             # Add documents to existing index
             vectorstore.add_documents(documents)
             
-            # Save the updated index
+            # Save the updated index with error handling
             os.makedirs(FAISS_PATH, exist_ok=True)
-            vectorstore.save_local(FAISS_PATH)
+            try:
+                vectorstore.save_local(FAISS_PATH)
+            except TypeError as e:
+                # Handle the argument error for older FAISS versions
+                logger.warning(f"Using alternative save method due to: {str(e)}")
+                try:
+                    # Try saving with a different method
+                    import pickle
+                    with open(os.path.join(FAISS_PATH, 'index.pickle'), 'wb') as f:
+                        pickle.dump(vectorstore, f)
+                    logger.info("Successfully saved FAISS index using pickle method")
+                except Exception as inner_e:
+                    logger.error(f"Failed to save FAISS index with alternative method: {str(inner_e)}")
             
             # Update session state
             st.session_state.vector_db_instance = vectorstore
@@ -301,9 +357,21 @@ def create_faiss_db(documents, update_existing=False):
             # Create new index
             vectorstore = FAISS.from_documents(documents, embedding_function)
             
-            # Save the index
+            # Save the index with error handling
             os.makedirs(FAISS_PATH, exist_ok=True)
-            vectorstore.save_local(FAISS_PATH)
+            try:
+                vectorstore.save_local(FAISS_PATH)
+            except TypeError as e:
+                # Handle the argument error for older FAISS versions
+                logger.warning(f"Using alternative save method due to: {str(e)}")
+                try:
+                    # Try saving with a different method
+                    import pickle
+                    with open(os.path.join(FAISS_PATH, 'index.pickle'), 'wb') as f:
+                        pickle.dump(vectorstore, f)
+                    logger.info("Successfully saved FAISS index using pickle method")
+                except Exception as inner_e:
+                    logger.error(f"Failed to save FAISS index with alternative method: {str(inner_e)}")
             
             # Update session state
             st.session_state.vector_db_instance = vectorstore
