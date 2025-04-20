@@ -108,6 +108,21 @@ def main():
     if 'db_status' in st.session_state and st.session_state.db_status:
         if st.session_state.db_status.startswith("Error"):
             st.warning(f"⚠️ Vector database is not available: {st.session_state.db_status}")
+            
+            # Provide specific guidance for API key issues
+            if "API key" in st.session_state.db_status:
+                st.error("OpenAI API key is missing or invalid. This is required for the vector database functionality.")
+                st.info("To fix this issue, you need to:")
+                st.markdown("1. Create an OpenAI API key at https://platform.openai.com/api-keys")
+                st.markdown("2. Add the key to your Streamlit secrets by:")
+                st.code("""
+# Local development: Add to .streamlit/secrets.toml
+[api_keys]
+openai = "your-openai-api-key"
+
+# Streamlit deployment: Add to the app settings in the Streamlit dashboard
+                """, language="toml")
+            
             st.info("You can still use the PubMed Downloader and Prompt Evaluator features which don't require a vector database.")
         elif "FAISS" in st.session_state.db_status:
             st.success("Using FAISS as the vector database (fallback mode)")
@@ -120,15 +135,27 @@ def main():
     
     # Display the selected tab
     if st.session_state.current_tab == "Document Management":
+        st.header("Document Management")
+        
+        # Check if vector database is available
         if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
             st.error("Document Management requires the vector database, which is not available in this environment.")
-        else:
-            document_management_ui()
+            if "API key" in st.session_state.db_status:
+                st.info("Please add your OpenAI API key to use this feature.")
+            return
+        
+        document_management_ui()
     elif st.session_state.current_tab == "Search & Query":
+        st.header("Search & Query")
+        
+        # Check if vector database is available
         if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
             st.error("Search & Query requires the vector database, which is not available in this environment.")
-        else:
-            search_query_ui()
+            if "API key" in st.session_state.db_status:
+                st.info("Please add your OpenAI API key to use this feature.")
+            return
+        
+        search_query_ui()
     elif st.session_state.current_tab == "PubMed Downloader":
         pubmed_downloader_ui()
     elif st.session_state.current_tab == "Prompt Evaluator":

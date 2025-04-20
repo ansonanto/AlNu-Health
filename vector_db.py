@@ -59,9 +59,15 @@ FAISS_PATH = "./faiss_index"
 
 def initialize_vector_db(reset_db=False) -> Optional[Any]:
     """Initialize vector database with proper handling for conflicts and version issues"""
-    # If we already have an instance in session state and we're not resetting, return it
     if not reset_db and 'vector_db_instance' in st.session_state and st.session_state.vector_db_instance is not None:
         return st.session_state.vector_db_instance
+    
+    # Check if OpenAI API key is available
+    if not OPENAI_API_KEY or OPENAI_API_KEY == "":
+        error_msg = "OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable or add it to your Streamlit secrets."
+        logger.error(error_msg)
+        st.session_state.db_status = f"Error: {error_msg}"
+        return None
     
     # Use embedding function for either database type
     try:

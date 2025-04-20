@@ -21,6 +21,11 @@ class CustomOpenAIEmbeddings(Embeddings):
         """
         self.api_key = api_key or OPENAI_API_KEY
         self.model = model
+        
+        # Check if API key is available
+        if not self.api_key or self.api_key == "":
+            raise ValueError("OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable or add it to your Streamlit secrets.")
+            
         # Using new OpenAI API style for version 1.0.0+
         self.client = OpenAI(api_key=self.api_key)
         logger.info(f"Initialized CustomOpenAIEmbeddings with model {model}")
