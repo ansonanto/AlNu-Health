@@ -19,6 +19,23 @@ A comprehensive system for downloading, managing, and querying medical research 
 2. Go to [Streamlit Community Cloud](https://streamlit.io/cloud)
 3. Sign in with your GitHub account
 4. Click "New app"
+
+### Deploying with Appliku
+
+1. Push your code to a GitHub repository
+2. Create an account on [Appliku](https://app.appliku.com/)
+3. Add a server in Appliku dashboard if you haven't already
+4. Create a new application from your GitHub repository
+   - Select the repository and branch
+   - Select your server
+5. Before deploying, add the following environment variables in Application Settings:
+   - `SERVER_NAME`: Your application domain (e.g., "myapp.applikuapp.com")
+   - `OPENAI_API_KEY`: Your OpenAI API key
+   - `SEMANTIC_SCHOLAR_API_KEY`: Your Semantic Scholar API key (if used)
+   - `EMAIL_ID`: Your email for API services
+6. In the Processes tab, add a process called "web" with the command `bash run.sh`
+7. Click "Save and Deploy"
+8. Once deployed, your app will be available at your Appliku domain
 5. Select your repository, branch, and the main file (`app.py`)
 6. Click on "Advanced settings" and add your secrets in TOML format:
 

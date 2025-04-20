@@ -1,4 +1,23 @@
+# Project specific
 chroma_db/
 alnu_env/
 __pycache__/
 .streamlit/secrets.toml
+
+# Python virtual environments
+env/
+venv/
+ENV/
+
+# Python bytecode
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Local development settings
+.env
+.env.local
