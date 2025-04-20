@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import sqlite3
 import streamlit as st
 import openai
 
