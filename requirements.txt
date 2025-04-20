@@ -10,6 +10,7 @@ pdfplumber==0.10.4
 
 # Vector database
 chromadb==0.4.22
+faiss-cpu>=1.7.4  # Alternative vector database that doesn't require SQLite
 
 # LangChain and related packages
 # Using compatible versions to avoid dependency conflicts
