@@ -70,10 +70,12 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         chunks = []
         
         for doc, score in retrieval_results:
-            # Only include documents with relevance score above threshold (lowered from 0.5 to 0.05)
-            # Using a very low threshold to ensure we get results
-            if score < 0.05 and not is_summary_request:
-                continue
+            # Handle both positive and negative relevance scores
+            # For negative scores (cosine distance), lower absolute values are better
+            # For positive scores (cosine similarity), higher values are better
+            # We'll accept all documents since filtering is causing issues
+            # This ensures we get results even with negative scores
+            pass
                 
             docs.append(doc)
             

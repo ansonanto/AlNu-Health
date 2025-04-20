@@ -3,6 +3,7 @@ import json
 import time
 import hashlib
 import streamlit as st
+from metapub import PubMedFetcher
 from Bio import Entrez
 import pdfplumber
 from tqdm import tqdm
@@ -468,18 +469,123 @@ def append_to_metadata_file(task):
         print(f"Error updating metadata file: {e}")
 
 
+def update_generic_pdf_metadata(pdf_filename, task_id):
+    """
+    Generate and update metadata for any PDF file, not just PubMed articles.
+    """
+    pdf_path = os.path.join(RESULTS_FOLDER, pdf_filename)
+    
+    if not os.path.exists(pdf_path):
+        print(f"PDF file does not exist: {pdf_filename}. Skipping metadata update.")
+        return False
+
+    print(f"Processing metadata for file: {pdf_filename}")
+    try:
+        # Extract potential PMID from filename if it exists
+        pmid = None
+        if '_' in pdf_filename:
+            potential_pmid = pdf_filename.split('_')[0]
+            if potential_pmid.isdigit():
+                pmid = potential_pmid
+        
+        # Try to get PubMed metadata if PMID is available
+        article = None
+        if pmid:
+            try:
+                # Initialize PubMedFetcher
+                FETCH = PubMedFetcher()
+                # Get article metadata from PubMed
+                article = FETCH.article_by_pmid(pmid)
+            except Exception as e:
+                print(f"Could not fetch PubMed metadata: {str(e)}")
+        
+        # Calculate MD5 hash
+        md5_hash = calculate_md5(pdf_path)
+        
+        # Get PDF page count
+        page_count = get_pdf_page_length(pdf_path)
+        
+        # Extract title from filename if no PubMed data
+        title = "Title not available"
+        if article and hasattr(article, 'title'):
+            title = article.title
+        elif '_' in pdf_filename:
+            # Extract title from filename (after PMID_)
+            title = pdf_filename.split('_', 1)[1].replace('.pdf', '')
+        
+        # Create metadata entry
+        task = {
+            "id": task_id,
+            "filename": pdf_filename,
+            "title": title,
+            "document_id": pmid if pmid else f"doc_{task_id}",
+            "url": f"{PUBMED_BASE_URL}{pmid}" if pmid else "",
+            "publication_date": str(article.history.get("accepted")) if article and hasattr(article, 'history') else "",
+            "abstract": article.abstract if article and hasattr(article, 'abstract') else "Abstract not available",
+            "authors": article.authors if article and hasattr(article, 'authors') else [],
+            "tags": article.keywords if article and hasattr(article, 'keywords') else [],
+            "pages": page_count,
+            "md5_hash": md5_hash,
+            "author_h_index": 0,  # Default value
+            "journal_impact_factor": "Not available",  # Default value
+            "pdf_embed": f"<embed src='/data/local-files/?d=pdfs/{pdf_filename}' width='100%' height='600px'/>",
+            "curator_id": "AlNu-Health",
+            "last_updated_date": time.strftime("%Y-%m-%d"),
+            "full_path": os.path.abspath(pdf_path),
+            "is_pubmed": pmid is not None
+        }
+        
+        # Try to get additional metadata if it's a PubMed article
+        if article:
+            # Get author h-index (for first author)
+            if hasattr(article, 'authors') and article.authors:
+                first_author = article.authors[0] if isinstance(article.authors, list) else article.authors
+                if isinstance(first_author, str):
+                    author_name = first_author
+                elif isinstance(first_author, dict):
+                    author_name = first_author.get('name', '')
+                else:
+                    author_name = str(first_author)
+                task["author_h_index"] = get_author_h_index(author_name)
+            
+            # Get journal impact factor
+            if hasattr(article, 'journal'):
+                task["journal_impact_factor"] = get_journal_impact_factor(article.journal)
+        
+        # Append to metadata file
+        append_to_metadata_file(task)
+        return True
+    except Exception as e:
+        print(f"Failed to update metadata for file: {pdf_filename}. Error: {str(e)}")
+        return False
+
 def update_article_metadata(pmid, task_id):
     """
     Generate and update metadata for a downloaded article.
     """
+    # First try the exact PMID.pdf format
     pdf_path = os.path.join(RESULTS_FOLDER, f"{pmid}.pdf")
     
+    # If not found, look for files that start with the PMID followed by underscore
     if not os.path.exists(pdf_path):
-        print(f"PDF file does not exist for PMID: {pmid}. Skipping metadata update.")
-        return False
+        # Get all PDF files in the results folder
+        pdf_files = [f for f in os.listdir(RESULTS_FOLDER) if f.lower().endswith('.pdf')]
+        
+        # Look for files that start with the PMID followed by underscore
+        matching_files = [f for f in pdf_files if f.startswith(f"{pmid}_")]
+        
+        if matching_files:
+            # Use the first matching file
+            pdf_path = os.path.join(RESULTS_FOLDER, matching_files[0])
+            print(f"Found PDF file for PMID: {pmid} with name: {matching_files[0]}")
+        else:
+            print(f"PDF file does not exist for PMID: {pmid}. Skipping metadata update.")
+            return False
 
     print(f"Processing metadata for PMID: {pmid}")
     try:
+        # Initialize PubMedFetcher
+        FETCH = PubMedFetcher()
         # Get article metadata from PubMed
         article = FETCH.article_by_pmid(pmid)
         if not article:
@@ -754,9 +860,21 @@ def pubmed_downloader_ui():
         st.session_state.download_status = None
     if 'downloaded_count' not in st.session_state:
         st.session_state.downloaded_count = 0
+    if 'show_download_popup' not in st.session_state:
+        st.session_state.show_download_popup = False
+    if 'last_download_keywords' not in st.session_state:
+        st.session_state.last_download_keywords = []
     
     # Setup tabs
     tab1, tab2, tab3 = st.tabs(["Search & Download", "Manage Downloads", "Metadata Explorer"])
+    
+    # Initialize session state variables if they don't exist
+    if 'show_download_popup' not in st.session_state:
+        st.session_state.show_download_popup = False
+    if 'downloaded_count' not in st.session_state:
+        st.session_state.downloaded_count = 0
+    if 'last_download_keywords' not in st.session_state:
+        st.session_state.last_download_keywords = []
     
     with tab1:
         st.header("Search & Download Articles")
@@ -794,7 +912,7 @@ def pubmed_downloader_ui():
                         progress_bar = st.progress(0)
                         
                         # Download articles with year range if specified
-                        st.session_state.downloaded_count = download_articles_by_keywords(
+                        downloaded_count = download_articles_by_keywords(
                             keywords, 
                             max_articles, 
                             filter_open_access,
@@ -803,11 +921,88 @@ def pubmed_downloader_ui():
                         
                         # Update status
                         st.session_state.download_status = "completed"
+                        st.session_state.downloaded_count = downloaded_count
                         progress_bar.progress(1.0)
+                        
+                        # Get list of newly downloaded files
+                        if downloaded_count > 0:
+                            # Store the keywords in session state for reference
+                            if 'last_download_keywords' not in st.session_state:
+                                st.session_state.last_download_keywords = []
+                            st.session_state.last_download_keywords = keywords
+                            
+                            # Set a flag to show the popup
+                            st.session_state.show_download_popup = True
                 else:
                     st.error("Please enter at least one keyword.")
             else:
                 st.error("Please enter at least one keyword.")
+        
+        # Show popup after download is completed
+        if st.session_state.get('show_download_popup', False):
+            # Create a popup using st.expander that's open by default
+            with st.expander(f"✅ Successfully downloaded {st.session_state.downloaded_count} articles!", expanded=True):
+                st.write(f"Keywords: {', '.join(st.session_state.last_download_keywords)}")
+                
+                # Use unique keys for buttons to avoid conflicts
+                # Option to add to vector database
+                if st.button("Add Downloaded Articles to Vector Database", key="add_to_vector_db_button"):
+                    with st.spinner("Adding articles to vector database..."):
+                        # Track newly downloaded files based on the keywords
+                        # Get all PDF files in the results folder
+                        all_pdf_files = [f for f in os.listdir(RESULTS_FOLDER) if f.lower().endswith('.pdf')]
+                        
+                        # Get the modification times of files to identify recently downloaded ones
+                        # Consider files modified in the last 5 minutes as newly downloaded
+                        current_time = time.time()
+                        five_minutes_ago = current_time - (5 * 60)  # 5 minutes in seconds
+                        
+                        # Filter for recently modified files
+                        recent_files = [f for f in all_pdf_files 
+                                      if os.path.getmtime(os.path.join(RESULTS_FOLDER, f)) > five_minutes_ago]
+                        
+                        if not recent_files:
+                            st.warning("No recently downloaded files found. Processing all files instead.")
+                            recent_files = all_pdf_files
+                        
+                        st.info(f"Processing {len(recent_files)} files to add to vector database")
+                        
+                        # Process the files
+                        new_docs = []
+                        progress_bar = st.progress(0)
+                        
+                        for i, pdf_file in enumerate(recent_files):
+                            # Update progress
+                            progress_bar.progress((i + 1) / len(recent_files))
+                            
+                            pdf_path = os.path.join(RESULTS_FOLDER, pdf_file)
+                            try:
+                                # Extract text from the PDF
+                                from document_processor import extract_text_from_pdf
+                                text = extract_text_from_pdf(pdf_path)
+                                
+                                # Create document info
+                                doc_info = {"name": pdf_file, "content": text, "path": pdf_path}
+                                new_docs.append(doc_info)
+                            except Exception as e:
+                                st.error(f"Error processing {pdf_file}: {str(e)}")
+                        
+                        if new_docs:
+                            # Add documents to vector database
+                            vectorstore = create_vector_db(new_docs, update_existing=True)
+                            if vectorstore:
+                                st.success(f"Successfully added {len(new_docs)} papers to the vector database!")
+                                # Clear the popup flag
+                                st.session_state.show_download_popup = False
+                                # Use st.rerun() to refresh the page
+                                st.rerun()
+                            else:
+                                st.error("Failed to add papers to vector database.")
+                
+                # Option to dismiss the popup
+                if st.button("Dismiss", key="dismiss_popup_button"):
+                    st.session_state.show_download_popup = False
+                    st.rerun()
     
     with tab2:
         st.header("Manage Downloaded Articles")
@@ -912,13 +1107,18 @@ def pubmed_downloader_ui():
                     processed_count = 0
                     
                     for pdf_file in pdf_files:
-                        # Extract PMID from filename
-                        pmid = pdf_file.split('_')[0] if '_' in pdf_file else pdf_file.replace('.pdf', '')
-                        if pmid.isdigit():
+                        # Check if it's a PubMed article (starts with digits followed by underscore)
+                        if '_' in pdf_file and pdf_file.split('_')[0].isdigit():
+                            # Extract PMID from filename
+                            pmid = pdf_file.split('_')[0]
                             success = update_article_metadata(pmid, task_id)
-                            if success:
-                                task_id += 1
-                                processed_count += 1
+                        else:
+                            # Process as a generic PDF
+                            success = update_generic_pdf_metadata(pdf_file, task_id)
+                            
+                        if success:
+                            task_id += 1
+                            processed_count += 1
                     
                     st.success(f"Processed metadata for {processed_count} articles.")
         

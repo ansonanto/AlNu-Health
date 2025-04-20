@@ -31,10 +31,10 @@ else:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def initialize_chroma() -> Optional[Any]:
+def initialize_chroma(reset_db=False) -> Optional[Any]:
     """Initialize ChromaDB with proper handling for conflicts and SQLite version issues"""
-    # If we already have an instance in session state, return it
-    if 'chroma_instance' in st.session_state and st.session_state.chroma_instance is not None:
+    # If we already have an instance in session state and we're not resetting, return it
+    if not reset_db and 'chroma_instance' in st.session_state and st.session_state.chroma_instance is not None:
         return st.session_state.chroma_instance
     
     # Check if ChromaDB can be used on this system
@@ -46,6 +46,22 @@ def initialize_chroma() -> Optional[Any]:
         st.session_state.db = None
         return None
     
+    # If reset_db is True, delete the ChromaDB directory
+    if reset_db and os.path.exists(CHROMA_PATH):
+        import shutil
+        try:
+            logger.info(f"Resetting ChromaDB directory at {CHROMA_PATH}")
+            # Create a backup directory
+            backup_dir = f"{CHROMA_PATH}_backup_{int(time.time())}"
+            if os.path.exists(CHROMA_PATH):
+                shutil.copytree(CHROMA_PATH, backup_dir)
+                logger.info(f"Created backup at {backup_dir}")
+            # Remove the original directory
+            shutil.rmtree(CHROMA_PATH)
+            logger.info("ChromaDB directory reset successfully")
+        except Exception as e:
+            logger.error(f"Error resetting ChromaDB directory: {str(e)}")
+    
     # Check if ChromaDB directory exists - if it does, we'll try to load from it instead of resetting
     chroma_exists = os.path.exists(CHROMA_PATH) and len(os.listdir(CHROMA_PATH)) > 0
     logger.info(f"ChromaDB directory exists: {chroma_exists}")
@@ -54,6 +70,56 @@ def initialize_chroma() -> Optional[Any]:
         # Use our custom OpenAI embeddings implementation
         embedding_function = CustomOpenAIEmbeddings(api_key=OPENAI_API_KEY)
         logger.info("Successfully initialized CustomOpenAIEmbeddings")
+        
+        # Initialize Chroma with proper settings using the updated langchain-chroma package
+        try:
+            # Ensure the directory exists
+            os.makedirs(CHROMA_PATH, exist_ok=True)
+            
+            # Create a simple Chroma instance without any client settings
+            vectorstore = Chroma(
+                persist_directory=CHROMA_PATH,
+                embedding_function=embedding_function,
+                collection_name="documents"
+            )
+            
+            # Store in session state
+            st.session_state.chroma_instance = vectorstore
+            st.session_state.db = vectorstore  # Also store as db for compatibility
+            st.session_state.db_status = "Initialized"
+            logger.info("Successfully initialized ChromaDB instance")
+            
+            # Return the instance
+            return vectorstore
+            
+        except Exception as e:
+            error_str = str(e)
+            logger.error(f"Error in initialize_chroma: {error_str}")
+            
+            # Check for tenant error which indicates a corrupted database
+            if "tenant" in error_str.lower() and "default_tenant" in error_str.lower() and not reset_db:
+                logger.warning("Detected tenant connection issue. Attempting to reset the database...")
+                # Try to reset and reinitialize
+                return initialize_chroma(reset_db=True)
+            
+            st.session_state.db_status = f"Error: {error_str}"
+            st.session_state.chroma_instance = None
+            st.session_state.db = None
+            return None
+    except Exception as e:
+        error_str = str(e)
+        logger.error(f"Error in initialize_chroma: {error_str}")
+        
+        # Check for tenant error which indicates a corrupted database
+        if "tenant" in error_str.lower() and "default_tenant" in error_str.lower() and not reset_db:
+            logger.warning("Detected tenant connection issue. Attempting to reset the database...")
+            # Try to reset and reinitialize
+            return initialize_chroma(reset_db=True)
+        
+        st.session_state.db_status = f"Error: {error_str}"
+        st.session_state.chroma_instance = None
+        st.session_state.db = None
+        return None
         
         # Initialize Chroma with proper settings using the updated langchain-chroma package
         try:

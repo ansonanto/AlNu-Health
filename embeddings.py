@@ -1,8 +1,8 @@
 import logging
 import random
 from typing import List
-# Using older OpenAI API style for compatibility with version 0.28.1
-import openai
+# Using new OpenAI API style for compatibility with version 1.0.0+
+from openai import OpenAI
 from langchain.embeddings.base import Embeddings
 from config import OPENAI_API_KEY
 
@@ -21,9 +21,8 @@ class CustomOpenAIEmbeddings(Embeddings):
         """
         self.api_key = api_key or OPENAI_API_KEY
         self.model = model
-        # Using older OpenAI API style for version 0.28.1
-        openai.api_key = self.api_key
-        self.client = openai
+        # Using new OpenAI API style for version 1.0.0+
+        self.client = OpenAI(api_key=self.api_key)
         logger.info(f"Initialized CustomOpenAIEmbeddings with model {model}")
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -34,12 +33,12 @@ class CustomOpenAIEmbeddings(Embeddings):
             batch_size = 10
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i+batch_size]
-                # Using older OpenAI API style for version 0.28.1
-                response = self.client.Embedding.create(
+                # Using new OpenAI API style for version 1.0.0+
+                response = self.client.embeddings.create(
                     input=batch,
                     model=self.model
                 )
-                batch_embeddings = [data['embedding'] for data in response['data']]
+                batch_embeddings = [data.embedding for data in response.data]
                 embeddings.extend(batch_embeddings)
                 
             return embeddings
@@ -55,12 +54,12 @@ class CustomOpenAIEmbeddings(Embeddings):
     def embed_query(self, text: str) -> List[float]:
         """Get embedding for a single query."""
         try:
-            # Using older OpenAI API style for version 0.28.1
-            response = self.client.Embedding.create(
+            # Using new OpenAI API style for version 1.0.0+
+            response = self.client.embeddings.create(
                 input=text,
                 model=self.model
             )
-            return response['data'][0]['embedding']
+            return response.data[0].embedding
         except Exception as e:
             logger.error(f"Error in embed_query: {str(e)}")
             # Fallback to random embedding if OpenAI API fails

@@ -10,9 +10,19 @@
         ]
     },
     "GLP-1 AND side effects / GLP-1 AND adverse events": {
-        "timestamp": "2025-04-19 14:32:49",
+        "timestamp": "2025-04-20 10:07:37",
         "found": 5,
         "downloaded": 3,
+        "filter_open_access": true,
+        "year_range": [
+            2010,
+            2025
+        ]
+    },
+    "GLP-1 AND physical activity": {
+        "timestamp": "2025-04-20 10:02:59",
+        "found": 5,
+        "downloaded": 4,
         "filter_open_access": true,
         "year_range": [
             2010,
