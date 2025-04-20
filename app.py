@@ -69,28 +69,40 @@ def main():
     """Main application UI"""
     # Check for existing ChromaDB data at startup
     if 'db_initialized' not in st.session_state:
-        # Initialize ChromaDB
-        db = initialize_chroma()
+        # Check SQLite version first
+        sqlite_version = sqlite3.sqlite_version_info
+        min_sqlite_version = (3, 35, 0)
+        can_use_chroma = sqlite_version >= min_sqlite_version
         
-        # Check if the database has documents
-        try:
-            # Try to get the collection count
-            if db and hasattr(db, '_collection'):
-                count = db._collection.count()
-                logger.info(f"Found {count} documents in ChromaDB at startup")
-                
-                if count > 0:
-                    # Database exists and has documents
-                    st.session_state.db = db
-                    st.session_state.processed_docs = True
-                    st.session_state.db_status = "Healthy (Loaded from disk)"
-                    logger.info("Successfully loaded existing ChromaDB database")
-        except Exception as e:
-            logger.error(f"Error checking ChromaDB at startup: {str(e)}")
-            
-        # If ChromaDB initialization failed, set appropriate status
-        if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
+        if not can_use_chroma:
+            logger.warning(f"SQLite version {sqlite_version} is not compatible with ChromaDB (requires >= {min_sqlite_version})")
+            st.session_state.db = None
+            st.session_state.processed_docs = False
+            st.session_state.db_status = f"Error: SQLite version {sqlite_version} is not compatible with ChromaDB"
             logger.warning("ChromaDB initialization failed, some features will be limited")
+        else:
+            # Initialize ChromaDB
+            db = initialize_chroma()
+            
+            # Check if the database has documents
+            try:
+                # Try to get the collection count
+                if db and hasattr(db, '_collection'):
+                    count = db._collection.count()
+                    logger.info(f"Found {count} documents in ChromaDB at startup")
+                    
+                    if count > 0:
+                        # Database exists and has documents
+                        st.session_state.db = db
+                        st.session_state.processed_docs = True
+                        st.session_state.db_status = "Healthy (Loaded from disk)"
+                        logger.info("Successfully loaded existing ChromaDB database")
+            except Exception as e:
+                logger.error(f"Error checking ChromaDB at startup: {str(e)}")
+                
+            # If ChromaDB initialization failed, set appropriate status
+            if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
+                logger.warning("ChromaDB initialization failed, some features will be limited")
         
         # Mark as initialized so we don't check again
         st.session_state.db_initialized = True
@@ -104,8 +116,14 @@ def main():
     
     # Check if ChromaDB is available and show warning if not
     if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
-        st.warning(f"⚠️ Vector database is not available: {st.session_state.db_status}. Some features will be limited.")
-        st.info("You can still use the PubMed Downloader and Prompt Evaluator features.")
+        st.warning(f"⚠️ Vector database is not available: {st.session_state.db_status}")
+        
+        # Check if it's a SQLite version issue
+        if "SQLite version" in st.session_state.db_status:
+            st.info("This is a known issue with some deployment environments that use older SQLite versions.")
+            st.info("ChromaDB requires SQLite 3.35.0 or higher, but the current environment has an older version.")
+        
+        st.info("You can still use the PubMed Downloader and Prompt Evaluator features which don't require ChromaDB.")
     
     # Display the selected tab
     if st.session_state.current_tab == "Document Management":
@@ -142,7 +160,12 @@ def document_management_ui():
         check_db_status()
         
         # Display database status
-        st.info(f"Vector Database Status: {st.session_state.db_status}")
+        if st.session_state.db_status and st.session_state.db_status.startswith("Error"):
+            st.error(f"Vector Database Status: {st.session_state.db_status}")
+            st.info("This is likely due to the SQLite version on the deployment environment being older than what ChromaDB requires.")
+            st.info("You can still use the PubMed Downloader and Prompt Evaluator features.")
+        else:
+            st.info(f"Vector Database Status: {st.session_state.db_status}")
         
         # Process documents button
         if st.button("Process Documents"):
