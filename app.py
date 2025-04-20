@@ -87,6 +87,10 @@ def main():
                     logger.info("Successfully loaded existing ChromaDB database")
         except Exception as e:
             logger.error(f"Error checking ChromaDB at startup: {str(e)}")
+            
+        # If ChromaDB initialization failed, set appropriate status
+        if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
+            logger.warning("ChromaDB initialization failed, some features will be limited")
         
         # Mark as initialized so we don't check again
         st.session_state.db_initialized = True
@@ -98,11 +102,22 @@ def main():
     tabs = ["Document Management", "Search & Query", "PubMed Downloader", "Prompt Evaluator"]
     st.session_state.current_tab = st.radio("Select Functionality:", tabs, horizontal=True)
     
+    # Check if ChromaDB is available and show warning if not
+    if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
+        st.warning(f"⚠️ Vector database is not available: {st.session_state.db_status}. Some features will be limited.")
+        st.info("You can still use the PubMed Downloader and Prompt Evaluator features.")
+    
     # Display the selected tab
     if st.session_state.current_tab == "Document Management":
-        document_management_ui()
+        if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
+            st.error("Document Management requires the vector database, which is not available in this environment.")
+        else:
+            document_management_ui()
     elif st.session_state.current_tab == "Search & Query":
-        search_query_ui()
+        if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
+            st.error("Search & Query requires the vector database, which is not available in this environment.")
+        else:
+            search_query_ui()
     elif st.session_state.current_tab == "PubMed Downloader":
         pubmed_downloader_ui()
     elif st.session_state.current_tab == "Prompt Evaluator":

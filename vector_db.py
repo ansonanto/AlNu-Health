@@ -2,23 +2,49 @@ import os
 import time
 import logging
 import streamlit as st
+import sqlite3
+import sys
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Union
 
 from embeddings import CustomOpenAIEmbeddings
 from config import OPENAI_API_KEY, CHROMA_PATH
 from utils import verify_chroma_persistence
 
+# Check if we can use ChromaDB (requires SQLite >= 3.35.0)
+SQLITE_VERSION = sqlite3.sqlite_version_info
+MIN_SQLITE_VERSION = (3, 35, 0)
+CAN_USE_CHROMA = SQLITE_VERSION >= MIN_SQLITE_VERSION
+
+# Only import Chroma if SQLite version is compatible
+if CAN_USE_CHROMA:
+    try:
+        from langchain_community.vectorstores import Chroma
+        CHROMA_IMPORT_ERROR = None
+    except ImportError as e:
+        CHROMA_IMPORT_ERROR = str(e)
+        CAN_USE_CHROMA = False
+else:
+    CHROMA_IMPORT_ERROR = f"SQLite version {SQLITE_VERSION} is not compatible with ChromaDB (requires >= {MIN_SQLITE_VERSION})"
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def initialize_chroma() -> Chroma:
-    """Initialize ChromaDB with proper handling for conflicts"""
+def initialize_chroma() -> Optional[Any]:
+    """Initialize ChromaDB with proper handling for conflicts and SQLite version issues"""
     # If we already have an instance in session state, return it
     if 'chroma_instance' in st.session_state and st.session_state.chroma_instance is not None:
         return st.session_state.chroma_instance
+    
+    # Check if ChromaDB can be used on this system
+    if not CAN_USE_CHROMA:
+        error_msg = CHROMA_IMPORT_ERROR or f"SQLite version {SQLITE_VERSION} is not compatible with ChromaDB"
+        logger.error(f"Failed to initialize vector database: {error_msg}")
+        st.session_state.db_status = f"Error: {error_msg}"
+        st.session_state.chroma_instance = None
+        st.session_state.db = None
+        return None
     
     # Check if ChromaDB directory exists - if it does, we'll try to load from it instead of resetting
     chroma_exists = os.path.exists(CHROMA_PATH) and len(os.listdir(CHROMA_PATH)) > 0
