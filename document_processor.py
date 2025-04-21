@@ -18,7 +18,10 @@ class PaperManager:
     def __init__(self):
         """Initialize the paper manager"""
         self.vectorstore = None
-        if 'chroma_instance' in st.session_state:
+        # Check for any vector database instance
+        if 'vector_db_instance' in st.session_state:
+            self.vectorstore = st.session_state.vector_db_instance
+        elif 'chroma_instance' in st.session_state:
             self.vectorstore = st.session_state.chroma_instance
     
     def clean_title(self, title: str) -> str:
@@ -54,22 +57,44 @@ class PaperManager:
     def get_paper_info(self) -> Tuple[int, List[str]]:
         """Get paper counts and titles with improved reliability"""
         try:
+            # Check if we have a vector database instance
             if not self.vectorstore:
-                if 'chroma_instance' in st.session_state:
+                if 'vector_db_instance' in st.session_state:
+                    self.vectorstore = st.session_state.vector_db_instance
+                elif 'chroma_instance' in st.session_state:
                     self.vectorstore = st.session_state.chroma_instance
                 else:
                     return 0, []
             
-            # Get all documents
-            all_docs = self.vectorstore.get()
+            # Handle different vector database types
+            if hasattr(self.vectorstore, 'get') and callable(self.vectorstore.get):
+                # ChromaDB style
+                all_docs = self.vectorstore.get()
+                if all_docs is None:
+                    return 0, []
+                
+                # Extract unique document sources
+                unique_sources = set()
+                for metadata in all_docs.get('metadatas', []):
+                    if metadata and 'source' in metadata:
+                        unique_sources.add(metadata['source'])
+                
+                return len(unique_sources), list(unique_sources)
             
-            # Extract unique document sources
-            unique_sources = set()
-            for metadata in all_docs.get('metadatas', []):
-                if metadata and 'source' in metadata:
-                    unique_sources.add(metadata['source'])
+            elif hasattr(self.vectorstore, 'metadata') and isinstance(self.vectorstore.metadata, list):
+                # Simple FAISS style
+                unique_sources = set()
+                for metadata in self.vectorstore.metadata:
+                    if metadata and 'source' in metadata:
+                        unique_sources.add(metadata['source'])
+                
+                return len(unique_sources), list(unique_sources)
             
-            return len(unique_sources), list(unique_sources)
+            else:
+                # Unknown vector database type
+                logger.warning("Unknown vector database type, cannot get paper info")
+                return 0, []
+                
         except Exception as e:
             logger.error(f"Error getting paper info: {str(e)}")
             return 0, []
