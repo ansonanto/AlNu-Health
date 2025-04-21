@@ -90,65 +90,133 @@ class SimpleVectorDB:
             logger.error(f"Error saving index: {str(e)}")
             return False
     
+    def chunk_text(self, text, max_chunk_size=4000):
+        """Split text into chunks to avoid token limits"""
+        # Simple chunking by characters
+        chunks = []
+        for i in range(0, len(text), max_chunk_size):
+            chunks.append(text[i:i+max_chunk_size])
+        return chunks
+    
     def get_embeddings(self, texts):
-        """Get embeddings for a list of texts"""
+        """Get embeddings for a list of texts with chunking for large documents"""
         try:
             if not self.client:
                 raise ValueError("OpenAI client not initialized")
             
-            embeddings = []
-            # Process in batches to avoid token limits
-            batch_size = 10
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i+batch_size]
-                response = self.client.embeddings.create(
-                    model="text-embedding-3-small",
-                    input=batch
-                )
-                batch_embeddings = [item.embedding for item in response.data]
-                embeddings.extend(batch_embeddings)
+            # First, chunk any large texts
+            chunked_texts = []
+            text_to_chunks_map = {}  # Maps original text index to chunk indices
             
-            return embeddings
+            for i, text in enumerate(texts):
+                # Check if text is too large (approximate token count)
+                if len(text) > 6000:  # Conservative estimate (about 1500 tokens)
+                    chunks = self.chunk_text(text)
+                    chunk_start_idx = len(chunked_texts)
+                    chunked_texts.extend(chunks)
+                    text_to_chunks_map[i] = list(range(chunk_start_idx, chunk_start_idx + len(chunks)))
+                    logger.info(f"Split document {i} into {len(chunks)} chunks")
+                else:
+                    chunked_texts.append(text)
+                    text_to_chunks_map[i] = [len(chunked_texts) - 1]
+            
+            # Now process the chunked texts in batches
+            all_embeddings = []
+            batch_size = 10
+            for i in range(0, len(chunked_texts), batch_size):
+                batch = chunked_texts[i:i+batch_size]
+                try:
+                    response = self.client.embeddings.create(
+                        model="text-embedding-3-small",
+                        input=batch
+                    )
+                    batch_embeddings = [item.embedding for item in response.data]
+                    all_embeddings.extend(batch_embeddings)
+                    logger.info(f"Embedded batch {i//batch_size + 1}/{(len(chunked_texts) + batch_size - 1)//batch_size}")
+                except Exception as e:
+                    logger.error(f"Error embedding batch {i//batch_size + 1}: {str(e)}")
+                    raise
+            
+            # Now combine the embeddings for chunks of the same original text
+            final_embeddings = []
+            for i in range(len(texts)):
+                chunk_indices = text_to_chunks_map[i]
+                if len(chunk_indices) == 1:
+                    # If text wasn't chunked, just use its embedding
+                    final_embeddings.append(all_embeddings[chunk_indices[0]])
+                else:
+                    # If text was chunked, average the embeddings of its chunks
+                    chunk_embeddings = [all_embeddings[idx] for idx in chunk_indices]
+                    avg_embedding = [sum(x) / len(chunk_embeddings) for x in zip(*chunk_embeddings)]
+                    final_embeddings.append(avg_embedding)
+                    logger.info(f"Averaged embeddings for document {i} from {len(chunk_indices)} chunks")
+            
+            return final_embeddings
         except Exception as e:
             logger.error(f"Error getting embeddings: {str(e)}")
             raise
     
     def add_documents(self, documents):
-        """Add documents to the index"""
+        """Add documents to the index with chunking for large documents"""
         try:
             if not self.index:
                 self.create_index()
             
-            # Extract text and metadata
-            texts = [doc["content"] for doc in documents if doc.get("content")]
-            if not texts:
-                logger.warning("No valid document content to add")
-                return False
+            # Process documents in smaller batches to avoid memory issues
+            batch_size = 5  # Process 5 documents at a time
+            total_docs = len(documents)
+            successful_docs = 0
             
-            # Get embeddings
-            embeddings = self.get_embeddings(texts)
+            for batch_start in range(0, total_docs, batch_size):
+                batch_end = min(batch_start + batch_size, total_docs)
+                batch = documents[batch_start:batch_end]
+                
+                try:
+                    # Extract text and metadata for this batch
+                    texts = []
+                    valid_indices = []
+                    
+                    for i, doc in enumerate(batch):
+                        if doc.get("content"):
+                            texts.append(doc["content"])
+                            valid_indices.append(i)
+                    
+                    if not texts:
+                        logger.warning(f"No valid document content in batch {batch_start//batch_size + 1}")
+                        continue
+                    
+                    # Get embeddings for this batch
+                    logger.info(f"Processing batch {batch_start//batch_size + 1}/{(total_docs + batch_size - 1)//batch_size} with {len(texts)} documents")
+                    embeddings = self.get_embeddings(texts)
+                    
+                    # Convert to numpy array
+                    embeddings_np = np.array(embeddings).astype('float32')
+                    
+                    # Add to index
+                    self.index.add(embeddings_np)
+                    
+                    # Add metadata for valid documents
+                    for i, idx in enumerate(valid_indices):
+                        doc = batch[idx]
+                        self.metadata.append({
+                            "name": doc.get("name", "unknown"),
+                            "path": doc.get("path", ""),
+                            "source": doc.get("name", "unknown"),
+                            "content": doc.get("content", "")
+                        })
+                    
+                    successful_docs += len(texts)
+                    logger.info(f"Successfully processed batch {batch_start//batch_size + 1}")
+                    
+                    # Save after each batch to avoid losing progress
+                    self.save()
+                    
+                except Exception as e:
+                    logger.error(f"Error processing batch {batch_start//batch_size + 1}: {str(e)}")
+                    # Continue with next batch instead of failing completely
             
-            # Convert to numpy array
-            embeddings_np = np.array(embeddings).astype('float32')
-            
-            # Add to index
-            self.index.add(embeddings_np)
-            
-            # Add metadata
-            for i, doc in enumerate(documents):
-                if doc.get("content"):
-                    self.metadata.append({
-                        "name": doc.get("name", "unknown"),
-                        "path": doc.get("path", ""),
-                        "source": doc.get("name", "unknown"),
-                        "content": doc.get("content", "")
-                    })
-            
-            # Save to disk
-            self.save()
-            
-            logger.info(f"Added {len(texts)} documents to index")
-            return True
+            logger.info(f"Added {successful_docs}/{total_docs} documents to index")
+            return successful_docs > 0
         except Exception as e:
             logger.error(f"Error adding documents: {str(e)}")
             return False
