@@ -228,18 +228,44 @@ def initialize_faiss(reset_db=False, embedding_function=None) -> Optional[Any]:
                 except Exception as e:
                     logger.warning(f"Standard FAISS loading failed: {str(e)}")
                     
-                    # Try alternative loading method using pickle
-                    pickle_path = os.path.join(FAISS_PATH, 'index.pickle')
-                    if os.path.exists(pickle_path):
+                    # Check for our custom format
+                    custom_marker = os.path.join(FAISS_PATH, 'custom_format.txt')
+                    index_path = os.path.join(FAISS_PATH, 'index.faiss')
+                    docstore_path = os.path.join(FAISS_PATH, 'docstore.json')
+                    
+                    if os.path.exists(custom_marker) and os.path.exists(index_path) and os.path.exists(docstore_path):
                         try:
-                            import pickle
-                            with open(pickle_path, 'rb') as f:
-                                vectorstore = pickle.load(f)
-                            logger.info("Successfully loaded existing FAISS index using pickle method")
+                            # Load the FAISS index directly
+                            import faiss
+                            faiss_index = faiss.read_index(index_path)
+                            
+                            # Load the document store
+                            import json
+                            from langchain.schema import Document
+                            from langchain.docstore.in_memory import InMemoryDocstore
+                            
+                            with open(docstore_path, 'r') as f:
+                                docstore_data = json.load(f)
+                            
+                            # Convert back to Document objects
+                            docstore_dict = {}
+                            for k, doc_data in docstore_data.items():
+                                doc = Document(
+                                    page_content=doc_data['page_content'],
+                                    metadata=doc_data['metadata']
+                                )
+                                docstore_dict[k] = doc
+                            
+                            docstore = InMemoryDocstore(docstore_dict)
+                            
+                            # Recreate the FAISS vectorstore
+                            vectorstore = FAISS(embedding_function, faiss_index, docstore, "documents")
+                            
+                            logger.info("Successfully loaded existing FAISS index using custom format")
                             st.session_state.processed_docs = True
-                            st.session_state.db_status = "Healthy (FAISS - Loaded from pickle)"
+                            st.session_state.db_status = "Healthy (FAISS - Loaded from custom format)"
                         except Exception as inner_e:
-                            logger.error(f"Pickle loading failed: {str(inner_e)}")
+                            logger.error(f"Custom format loading failed: {str(inner_e)}")
                             # Create empty index as fallback
                             vectorstore = FAISS(embedding_function, [], [], "documents")
                             logger.warning("Created empty FAISS index as fallback")
@@ -264,11 +290,34 @@ def initialize_faiss(reset_db=False, embedding_function=None) -> Optional[Any]:
                     # Handle the argument error for older FAISS versions
                     logger.warning(f"Using alternative save method for empty index due to: {str(e)}")
                     try:
-                        # Try saving with a different method
-                        import pickle
-                        with open(os.path.join(FAISS_PATH, 'index.pickle'), 'wb') as f:
-                            pickle.dump(vectorstore, f)
-                        logger.info("Successfully saved empty FAISS index using pickle method")
+                        # Try saving with a different method - save only the index and embeddings
+                        # Extract just the FAISS index and embeddings
+                        faiss_index = vectorstore.index
+                        docstore = vectorstore.docstore
+                        
+                        # Save the index directly using FAISS methods
+                        import faiss
+                        index_path = os.path.join(FAISS_PATH, 'index.faiss')
+                        faiss.write_index(faiss_index, index_path)
+                        
+                        # Save metadata separately
+                        import json
+                        with open(os.path.join(FAISS_PATH, 'docstore.json'), 'w') as f:
+                            # Convert docstore to a serializable format
+                            docstore_data = {}
+                            for k, doc in docstore._dict.items():
+                                if hasattr(doc, 'page_content') and hasattr(doc, 'metadata'):
+                                    docstore_data[k] = {
+                                        'page_content': doc.page_content,
+                                        'metadata': doc.metadata
+                                    }
+                            json.dump(docstore_data, f)
+                        
+                        # Create a marker file to indicate this is our custom format
+                        with open(os.path.join(FAISS_PATH, 'custom_format.txt'), 'w') as f:
+                            f.write('This index was saved in a custom format to avoid pickling issues.')
+                            
+                        logger.info("Successfully saved empty FAISS index using custom method")
                     except Exception as inner_e:
                         logger.error(f"Failed to save empty FAISS index with alternative method: {str(inner_e)}")
                         # Continue anyway since we have the in-memory instance
@@ -420,11 +469,33 @@ def create_faiss_db(documents, update_existing=False):
                 # Handle the argument error for older FAISS versions
                 logger.warning(f"Using alternative save method due to: {str(e)}")
                 try:
-                    # Try saving with a different method
-                    import pickle
-                    with open(os.path.join(FAISS_PATH, 'index.pickle'), 'wb') as f:
-                        pickle.dump(vectorstore, f)
-                    logger.info("Successfully saved FAISS index using pickle method")
+                    # Extract just the FAISS index and embeddings
+                    faiss_index = vectorstore.index
+                    docstore = vectorstore.docstore
+                    
+                    # Save the index directly using FAISS methods
+                    import faiss
+                    index_path = os.path.join(FAISS_PATH, 'index.faiss')
+                    faiss.write_index(faiss_index, index_path)
+                    
+                    # Save metadata separately
+                    import json
+                    with open(os.path.join(FAISS_PATH, 'docstore.json'), 'w') as f:
+                        # Convert docstore to a serializable format
+                        docstore_data = {}
+                        for k, doc in docstore._dict.items():
+                            if hasattr(doc, 'page_content') and hasattr(doc, 'metadata'):
+                                docstore_data[k] = {
+                                    'page_content': doc.page_content,
+                                    'metadata': doc.metadata
+                                }
+                        json.dump(docstore_data, f)
+                    
+                    # Create a marker file to indicate this is our custom format
+                    with open(os.path.join(FAISS_PATH, 'custom_format.txt'), 'w') as f:
+                        f.write('This index was saved in a custom format to avoid pickling issues.')
+                        
+                    logger.info("Successfully saved FAISS index using custom method")
                 except Exception as inner_e:
                     logger.error(f"Failed to save FAISS index with alternative method: {str(inner_e)}")
             
