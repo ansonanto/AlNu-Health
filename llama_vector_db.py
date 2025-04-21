@@ -8,15 +8,15 @@ import logging
 import streamlit as st
 from typing import List, Dict, Any, Optional, Union
 
-# LlamaIndex imports
-from llama_index.core import (
+# LlamaIndex imports (compatible with version 0.9.48)
+from llama_index import (
     VectorStoreIndex, 
     Document, 
-    Settings,
+    ServiceContext,
     StorageContext
 )
-from llama_index.core.node_parser import SentenceSplitter
-from llama_index.vector_stores.faiss import FaissVectorStore
+from llama_index.node_parser import SentenceSplitter
+from llama_index.vector_stores import FaissVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 
 # Local imports
@@ -41,22 +41,23 @@ def init_settings():
     embed_model = OpenAIEmbedding(
         model="text-embedding-3-small",
         api_key=OPENAI_API_KEY,
-        dimensions=1536
+        embed_batch_size=10  # Smaller batch size to avoid token limits
     )
     
-    # Configure global settings
-    Settings.embed_model = embed_model
-    Settings.chunk_size = 1000
-    Settings.chunk_overlap = 200
-    
     # Set up node parser for text splitting
-    Settings.node_parser = SentenceSplitter(
+    node_parser = SentenceSplitter(
         chunk_size=1000,
         chunk_overlap=200
     )
     
+    # Create service context
+    service_context = ServiceContext.from_defaults(
+        embed_model=embed_model,
+        node_parser=node_parser
+    )
+    
     logger.info("LlamaIndex settings initialized")
-    return True
+    return service_context
 
 def initialize_vector_db(reset_db=False) -> Optional[Any]:
     """Initialize vector database with LlamaIndex"""
@@ -72,8 +73,8 @@ def initialize_vector_db(reset_db=False) -> Optional[Any]:
             st.session_state.db_status = f"Error: {error_msg}"
             return None
         
-        # Initialize settings
-        init_settings()
+        # Initialize settings and get service context
+        service_context = init_settings()
         
         # Create storage directory if it doesn't exist
         os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -90,11 +91,15 @@ def initialize_vector_db(reset_db=False) -> Optional[Any]:
         # Create a new empty index
         try:
             # Set up FAISS vector store
-            vector_store = FaissVectorStore(dim=1536)
+            vector_store = FaissVectorStore()
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
             
-            # Create an empty index
-            index = VectorStoreIndex([], storage_context=storage_context)
+            # Create an empty index with service context
+            index = VectorStoreIndex(
+                documents=[],
+                storage_context=storage_context,
+                service_context=service_context
+            )
             
             # Store in session state
             st.session_state.vector_db_instance = index
@@ -148,8 +153,8 @@ def create_vector_db(documents, update_existing=False):
         
         logger.info(f"Converted {len(llama_docs)} documents to LlamaIndex format")
         
-        # Initialize settings if not already done
-        init_settings()
+        # Initialize settings and get service context
+        service_context = init_settings()
         
         # Get existing index or create new one
         if update_existing and 'vector_db_instance' in st.session_state and st.session_state.vector_db_instance is not None:
@@ -161,9 +166,13 @@ def create_vector_db(documents, update_existing=False):
             logger.info(f"Updated existing index with {len(llama_docs)} documents")
         else:
             # Create new index
-            vector_store = FaissVectorStore(dim=1536)
+            vector_store = FaissVectorStore()
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
-            index = VectorStoreIndex(llama_docs, storage_context=storage_context)
+            index = VectorStoreIndex(
+                documents=llama_docs, 
+                storage_context=storage_context,
+                service_context=service_context
+            )
             logger.info(f"Created new index with {len(llama_docs)} documents")
         
         # Update session state

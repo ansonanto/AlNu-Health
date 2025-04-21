@@ -8,7 +8,8 @@ from typing import List, Dict, Any, Optional
 
 from openai import OpenAI
 from llama_index.core.response_synthesizers import get_response_synthesizer
-from llama_index.core.llms import OpenAI as LlamaOpenAI
+# Use the OpenAI integration directly instead of the llama_index wrapper
+from llama_index.llms.openai import OpenAI as LlamaOpenAI
 
 from config import OPENAI_API_KEY, MODEL_NAME
 
@@ -34,10 +35,13 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         top_k = 3 if is_summary_request else 5
         
         # Create query engine with appropriate parameters
+        from llama_index.indices.query.schema import QueryMode
+        
+        # For LlamaIndex 0.9.48, we need to use different parameters
         query_engine = db.as_query_engine(
             similarity_top_k=top_k,
-            response_mode="compact" if is_summary_request else "tree_summarize",
-            llm=LlamaOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY)
+            # Use simpler response mode for compatibility
+            response_mode="default" 
         )
         
         # Execute query
@@ -45,22 +49,37 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         response = query_engine.query(query)
         
         # Extract source nodes and their metadata
-        source_nodes = response.source_nodes
+        # In 0.9.48, source_nodes is a list, not a property
+        source_nodes = response.source_nodes if hasattr(response, "source_nodes") else []
         sources = []
         chunks = []
         
         for node in source_nodes:
+            # Handle different node structure in 0.9.48
+            if hasattr(node, "node"):
+                # Newer versions wrap the node
+                node_obj = node.node
+                score = node.score if hasattr(node, "score") else None
+            else:
+                # Older versions have the node directly
+                node_obj = node
+                score = getattr(node, "score", None)
+                
+            # Extract metadata
+            metadata = getattr(node_obj, "metadata", {})
+            text = getattr(node_obj, "text", "")
+                
             source_info = {
-                "source": node.metadata.get("name", "Unknown"),
-                "score": node.score if hasattr(node, "score") else None,
-                "chunk": node.metadata.get("chunk", 0),
-                "total_chunks": node.metadata.get("total_chunks", 1)
+                "source": metadata.get("name", "Unknown"),
+                "score": score,
+                "chunk": metadata.get("chunk", 0),
+                "total_chunks": metadata.get("total_chunks", 1)
             }
             sources.append(source_info)
             
             chunk_info = {
-                "content": node.text,
-                "metadata": node.metadata
+                "content": text,
+                "metadata": metadata
             }
             chunks.append(chunk_info)
             
