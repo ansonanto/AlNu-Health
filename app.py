@@ -13,10 +13,10 @@ from utils import reset_chroma, verify_chroma_persistence
 
 # Import modules
 from document_processor import PaperManager, process_documents
-# Use LlamaIndex implementation instead of the original vector_db
-from llama_vector_db import initialize_vector_db, create_vector_db, check_db_status
-# Use LlamaIndex-based query processor
-from llama_query_processor import query_documents, generate_accuracy_percentage
+# Use simple FAISS implementation instead of the original vector_db or LlamaIndex
+from simple_vector_db import initialize_vector_db, create_vector_db, check_db_status
+# Use simple query processor
+from simple_query_processor import query_documents, generate_accuracy_percentage
 from pubmed_downloader import pubmed_downloader_ui
 from prompt_evaluator import prompt_evaluator_ui
 
