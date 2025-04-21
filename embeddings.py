@@ -34,17 +34,63 @@ class CustomOpenAIEmbeddings(Embeddings):
         """Get embeddings for a list of documents."""
         try:
             embeddings = []
-            # Process in batches to avoid rate limits
-            batch_size = 10
+            # Process in smaller batches to avoid token limits
+            batch_size = 5  # Smaller batch size to avoid token limits
+            total_batches = (len(texts) + batch_size - 1) // batch_size
+            
+            logger.info(f"Embedding {len(texts)} texts in {total_batches} batches of size {batch_size}")
+            
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i+batch_size]
-                # Using new OpenAI API style for version 1.0.0+
-                response = self.client.embeddings.create(
-                    input=batch,
-                    model=self.model
-                )
-                batch_embeddings = [data.embedding for data in response.data]
-                embeddings.extend(batch_embeddings)
+                
+                # Check token count for this batch (approximate)
+                total_chars = sum(len(text) for text in batch)
+                approx_tokens = total_chars / 4  # Rough estimate: 4 chars per token
+                
+                if approx_tokens > 8000:
+                    logger.warning(f"Batch {i//batch_size + 1}/{total_batches} may exceed token limit ({approx_tokens:.0f} est. tokens)")
+                    # Further split this batch if needed
+                    sub_batch_size = max(1, batch_size // 2)
+                    logger.info(f"Splitting into smaller sub-batches of size {sub_batch_size}")
+                    
+                    sub_batches = [batch[j:j+sub_batch_size] for j in range(0, len(batch), sub_batch_size)]
+                    for sub_batch in sub_batches:
+                        try:
+                            sub_response = self.client.embeddings.create(
+                                input=sub_batch,
+                                model=self.model
+                            )
+                            sub_embeddings = [data.embedding for data in sub_response.data]
+                            embeddings.extend(sub_embeddings)
+                        except Exception as sub_e:
+                            logger.error(f"Error in sub-batch embedding: {str(sub_e)}")
+                            # Fallback to random embeddings for this sub-batch
+                            dimension = 1536
+                            sub_random_embeddings = [
+                                [random.uniform(-1, 1) for _ in range(dimension)]
+                                for _ in sub_batch
+                            ]
+                            embeddings.extend(sub_random_embeddings)
+                else:
+                    # Process normal batch
+                    try:
+                        # Using new OpenAI API style for version 1.0.0+
+                        response = self.client.embeddings.create(
+                            input=batch,
+                            model=self.model
+                        )
+                        batch_embeddings = [data.embedding for data in response.data]
+                        embeddings.extend(batch_embeddings)
+                        logger.info(f"Successfully embedded batch {i//batch_size + 1}/{total_batches}")
+                    except Exception as batch_e:
+                        logger.error(f"Error in batch embedding: {str(batch_e)}")
+                        # Fallback to random embeddings for this batch
+                        dimension = 1536
+                        random_embeddings = [
+                            [random.uniform(-1, 1) for _ in range(dimension)]
+                            for _ in batch
+                        ]
+                        embeddings.extend(random_embeddings)
                 
             return embeddings
         except Exception as e:

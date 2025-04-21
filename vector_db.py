@@ -329,20 +329,46 @@ def create_faiss_db(documents, update_existing=False):
         
         # Convert documents to the format expected by FAISS
         from langchain.schema import Document
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        
+        # Create a text splitter for chunking large documents
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=4000,  # Smaller chunks to avoid token limits
+            chunk_overlap=200,
+            length_function=len,
+            separators=["\n\n", "\n", ".", " ", ""]
+        )
+        
+        # Process and chunk documents
         langchain_docs = []
         for doc in documents:
             try:
-                # Create a Document with page_content and metadata
-                langchain_doc = Document(
-                    page_content=doc["content"],
-                    metadata={"name": doc["name"], "path": doc["path"]}
-                )
-                langchain_docs.append(langchain_doc)
+                if not doc.get("content"):
+                    logger.warning(f"Empty content for document: {doc.get('name')}")
+                    continue
+                    
+                # Split the document into smaller chunks
+                doc_content = doc["content"]
+                chunks = text_splitter.split_text(doc_content)
+                logger.info(f"Split document '{doc.get('name')}' into {len(chunks)} chunks")
+                
+                # Create a Document for each chunk with metadata
+                for i, chunk in enumerate(chunks):
+                    langchain_doc = Document(
+                        page_content=chunk,
+                        metadata={
+                            "name": doc.get("name", "unknown"),
+                            "path": doc.get("path", ""),
+                            "chunk": i,
+                            "total_chunks": len(chunks)
+                        }
+                    )
+                    langchain_docs.append(langchain_doc)
             except Exception as doc_e:
                 logger.error(f"Error converting document to langchain format: {str(doc_e)}")
                 logger.error(f"Document keys: {doc.keys() if isinstance(doc, dict) else 'Not a dict'}")
         
-        logger.info(f"Converted {len(langchain_docs)} documents to langchain format")
+        logger.info(f"Converted {len(documents)} documents into {len(langchain_docs)} chunks for embedding")
         
         # Get embedding function
         embedding_function = CustomOpenAIEmbeddings(api_key=OPENAI_API_KEY)
@@ -426,20 +452,46 @@ def create_chroma_db(documents, update_existing=False):
         
         # Convert documents to the format expected by ChromaDB
         from langchain.schema import Document
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        
+        # Create a text splitter for chunking large documents
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=4000,  # Smaller chunks to avoid token limits
+            chunk_overlap=200,
+            length_function=len,
+            separators=["\n\n", "\n", ".", " ", ""]
+        )
+        
+        # Process and chunk documents
         langchain_docs = []
         for doc in documents:
             try:
-                # Create a Document with page_content and metadata
-                langchain_doc = Document(
-                    page_content=doc["content"],
-                    metadata={"name": doc["name"], "path": doc["path"]}
-                )
-                langchain_docs.append(langchain_doc)
+                if not doc.get("content"):
+                    logger.warning(f"Empty content for document: {doc.get('name')}")
+                    continue
+                    
+                # Split the document into smaller chunks
+                doc_content = doc["content"]
+                chunks = text_splitter.split_text(doc_content)
+                logger.info(f"Split document '{doc.get('name')}' into {len(chunks)} chunks")
+                
+                # Create a Document for each chunk with metadata
+                for i, chunk in enumerate(chunks):
+                    langchain_doc = Document(
+                        page_content=chunk,
+                        metadata={
+                            "name": doc.get("name", "unknown"),
+                            "path": doc.get("path", ""),
+                            "chunk": i,
+                            "total_chunks": len(chunks)
+                        }
+                    )
+                    langchain_docs.append(langchain_doc)
             except Exception as doc_e:
                 logger.error(f"Error converting document to langchain format: {str(doc_e)}")
                 logger.error(f"Document keys: {doc.keys() if isinstance(doc, dict) else 'Not a dict'}")
         
-        logger.info(f"Converted {len(langchain_docs)} documents to langchain format for ChromaDB")
+        logger.info(f"Converted {len(documents)} documents into {len(langchain_docs)} chunks for ChromaDB")
         
         # Check if we have a valid ChromaDB instance
         if st.session_state.chroma_instance is None:
