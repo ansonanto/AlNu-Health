@@ -299,14 +299,26 @@ def initialize_faiss(reset_db=False, embedding_function=None) -> Optional[Any]:
 
 def create_vector_db(documents, update_existing=False):
     """Create or update vector database from documents"""
-    # Use the appropriate vector database based on what's available
-    if VECTOR_DB_TYPE == "chroma":
-        return create_chroma_db(documents, update_existing)
-    elif VECTOR_DB_TYPE == "faiss":
-        return create_faiss_db(documents, update_existing)
-    else:
-        logger.error("No compatible vector database available for creating/updating")
-        st.session_state.db_status = "Error: No compatible vector database available"
+    try:
+        # Log the document count and types for debugging
+        logger.info(f"Creating vector database with {len(documents)} documents")
+        logger.info(f"Document types: {[type(doc) for doc in documents[:3]]}")
+        logger.info(f"Document keys: {[doc.keys() for doc in documents[:3]]}")
+        
+        # Use the appropriate vector database based on what's available
+        if VECTOR_DB_TYPE == "chroma":
+            logger.info("Using ChromaDB for vector database creation")
+            return create_chroma_db(documents, update_existing)
+        elif VECTOR_DB_TYPE == "faiss":
+            logger.info("Using FAISS for vector database creation")
+            return create_faiss_db(documents, update_existing)
+        else:
+            logger.error("No compatible vector database available for creating/updating")
+            st.session_state.db_status = "Error: No compatible vector database available"
+            return None
+    except Exception as e:
+        logger.error(f"Error in create_vector_db: {str(e)}")
+        st.session_state.db_status = f"Error: Failed to create vector database: {str(e)}"
         return None
 
 def create_faiss_db(documents, update_existing=False):
@@ -314,6 +326,23 @@ def create_faiss_db(documents, update_existing=False):
     try:
         # Start timer
         start_time = time.time()
+        
+        # Convert documents to the format expected by FAISS
+        from langchain.schema import Document
+        langchain_docs = []
+        for doc in documents:
+            try:
+                # Create a Document with page_content and metadata
+                langchain_doc = Document(
+                    page_content=doc["content"],
+                    metadata={"name": doc["name"], "path": doc["path"]}
+                )
+                langchain_docs.append(langchain_doc)
+            except Exception as doc_e:
+                logger.error(f"Error converting document to langchain format: {str(doc_e)}")
+                logger.error(f"Document keys: {doc.keys() if isinstance(doc, dict) else 'Not a dict'}")
+        
+        logger.info(f"Converted {len(langchain_docs)} documents to langchain format")
         
         # Get embedding function
         embedding_function = CustomOpenAIEmbeddings(api_key=OPENAI_API_KEY)
@@ -324,7 +353,7 @@ def create_faiss_db(documents, update_existing=False):
             vectorstore = st.session_state.vector_db_instance
             
             # Add documents to existing index
-            vectorstore.add_documents(documents)
+            vectorstore.add_documents(langchain_docs)
             
             # Save the updated index with error handling
             os.makedirs(FAISS_PATH, exist_ok=True)
@@ -355,7 +384,7 @@ def create_faiss_db(documents, update_existing=False):
             return vectorstore
         else:
             # Create new index
-            vectorstore = FAISS.from_documents(documents, embedding_function)
+            vectorstore = FAISS.from_documents(langchain_docs, embedding_function)
             
             # Save the index with error handling
             os.makedirs(FAISS_PATH, exist_ok=True)
@@ -395,6 +424,23 @@ def create_chroma_db(documents, update_existing=False):
         # Start timer
         start_time = time.time()
         
+        # Convert documents to the format expected by ChromaDB
+        from langchain.schema import Document
+        langchain_docs = []
+        for doc in documents:
+            try:
+                # Create a Document with page_content and metadata
+                langchain_doc = Document(
+                    page_content=doc["content"],
+                    metadata={"name": doc["name"], "path": doc["path"]}
+                )
+                langchain_docs.append(langchain_doc)
+            except Exception as doc_e:
+                logger.error(f"Error converting document to langchain format: {str(doc_e)}")
+                logger.error(f"Document keys: {doc.keys() if isinstance(doc, dict) else 'Not a dict'}")
+        
+        logger.info(f"Converted {len(langchain_docs)} documents to langchain format for ChromaDB")
+        
         # Check if we have a valid ChromaDB instance
         if st.session_state.chroma_instance is None:
             st.session_state.chroma_instance = initialize_chroma()
@@ -410,61 +456,30 @@ def create_chroma_db(documents, update_existing=False):
             separators=["\n\n", "\n", " ", ""]
         )
         
-        # Setup progress tracking
-        total_docs = len(documents)
-        st.write(f"Creating vector database for {total_docs} documents...")
-        
-        # Create progress bar
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        # Process each document
-        for i, doc in enumerate(documents):
-            # Update progress
-            progress_percent = i / total_docs
-            progress_bar.progress(progress_percent)
-            status_text.write(f"Embedding document {i+1}/{total_docs}: {doc.get('name', 'unknown')}")
+        # Use the Chroma add_documents method directly with the langchain_docs
+        try:
+            # Get the ChromaDB instance
+            chroma_db = st.session_state.chroma_instance
             
-            # Skip if document is empty
-            if not doc.get('content'):
-                logger.warning(f"Empty content for document: {doc.get('name')}")
-                continue
+            # Add documents to ChromaDB
+            logger.info(f"Adding {len(langchain_docs)} documents to ChromaDB")
+            chroma_db.add_documents(langchain_docs)
             
-            # Create document chunks
-            chunks = text_splitter.split_text(doc['content'])
+            # Update status
+            st.success(f"Successfully added {len(langchain_docs)} documents to vector database")
+            st.session_state.processed_docs = True
+            st.session_state.db_status = "Healthy (ChromaDB)"
             
-            # Create metadata for each chunk
-            metadatas = [
-                {
-                    "source": doc.get('name', 'unknown'),
-                    "chunk": i,
-                    "document_id": doc.get('name', 'unknown'),
-                }
-                for i in range(len(chunks))
-            ]
+            # Log completion time
+            end_time = time.time()
+            logger.info(f"ChromaDB updated in {end_time - start_time:.2f} seconds")
             
-            # Add chunks to vector store
-            st.session_state.chroma_instance.add_texts(
-                texts=chunks,
-                metadatas=metadatas
-            )
-        
-        # Complete the progress bar
-        progress_bar.progress(1.0)
-        status_text.write(f"✅ Vector database creation complete! Processed {total_docs} documents.")
-        
-        # Persist changes
-        st.session_state.chroma_instance.persist()
-        
-        # Update session state
-        st.session_state.processed_docs = True
-        st.session_state.last_processed_time = time.time()
-        
-        # Calculate processing time
-        processing_time = time.time() - start_time
-        logger.info(f"Vector database created in {processing_time:.2f} seconds")
-        
-        return st.session_state.chroma_instance
+            return chroma_db
+        except Exception as e:
+            logger.error(f"Error adding documents to ChromaDB: {str(e)}")
+            st.error(f"Error adding documents to vector database: {str(e)}")
+            st.session_state.db_status = f"Error: {str(e)}"
+            return None
     except Exception as e:
         logger.error(f"Error creating vector database: {str(e)}")
         st.error(f"Error creating vector database: {str(e)}")
