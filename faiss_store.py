@@ -5,11 +5,13 @@ import pickle
 import logging
 import numpy as np
 import streamlit as st
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from langchain.docstore.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema.retriever import BaseRetriever
 from langchain.schema.embeddings import Embeddings
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -59,11 +61,6 @@ class FAISSVectorStore:
             logger.warning("No documents to add")
             return
 
-        if update_existing and os.path.exists(self.index_path):
-            logger.info("Resetting existing index")
-            self.index = faiss.IndexFlatL2(self.dimension)
-            self.metadata = []
-
         # Create text splitter for chunking
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
@@ -75,31 +72,49 @@ class FAISSVectorStore:
         # Process each document
         all_chunks = []
         all_metadatas = []
-        for doc in documents:
+        
+        # Create progress bar for document processing
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, doc in enumerate(documents):
+            # Update progress
+            progress = (i + 1) / len(documents)
+            progress_bar.progress(progress)
+            status_text.write(f"Processing document {i + 1}/{len(documents)}")
+            
             # Split text into chunks
             chunks = text_splitter.split_text(doc.page_content)
             
-            # Create metadata for each chunk
+            # Get or create metadata
             doc_metadata = doc.metadata if hasattr(doc, 'metadata') else {}
-            chunk_metadatas = [{
-                **doc_metadata,
-                'chunk': i,
-                'total_chunks': len(chunks)
-            } for i in range(len(chunks))]
             
-            all_chunks.extend(chunks)
-            all_metadatas.extend(chunk_metadatas)
+            # Ensure source and title are present
+            if 'source' not in doc_metadata:
+                doc_metadata['source'] = f'Document_{i+1}'
+            if 'title' not in doc_metadata:
+                doc_metadata['title'] = os.path.basename(doc_metadata['source'])
+                
+            # Create chunk-specific metadata
+            for j, chunk in enumerate(chunks):
+                chunk_metadata = {
+                    'content': chunk,
+                    'metadata': {
+                        **doc_metadata,
+                        'chunk': j + 1,
+                        'total_chunks': len(chunks)
+                    }
+                }
+                all_metadatas.append(chunk_metadata)
+                all_chunks.append(chunk)
 
-        # Process chunks in batches
+        # Process chunks in batches for embeddings
         try:
             batch_size = 20  # Process 20 chunks at a time
             all_embeddings = []
             total_batches = (len(all_chunks) + batch_size - 1) // batch_size
             
-            # Create progress bar and status text
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
+            # Process each batch
             for i in range(0, len(all_chunks), batch_size):
                 batch_chunks = all_chunks[i:i + batch_size]
                 current_batch = i // batch_size + 1
@@ -109,31 +124,29 @@ class FAISSVectorStore:
                 progress_bar.progress(progress)
                 status_text.write(f"Generating embeddings: Batch {current_batch}/{total_batches}")
                 
-                # Process batch
+                # Get embeddings for the batch
                 batch_embeddings = self.embedding_function.embed_documents(batch_chunks)
                 all_embeddings.extend(batch_embeddings)
-                logger.info(f"Processed batch {current_batch}/{total_batches}")
             
-            # Complete progress
-            progress_bar.progress(1.0)
-            status_text.write("✅ Embeddings generation complete!")
-            
-            # Convert to numpy array
+            # Convert to numpy array and add to FAISS index
             embeddings_np = np.array(all_embeddings).astype('float32')
-            
-            # Add to FAISS index
             self.index.add(embeddings_np)
             
             # Store metadata
-            for chunk, metadata in zip(all_chunks, all_metadatas):
-                self.metadata.append({
-                    "content": chunk,
-                    "metadata": metadata
-                })
+            self.metadata.extend(all_metadatas)
             
             # Save to disk
             self._save_index()
+            
+            # Complete progress
+            progress_bar.progress(1.0)
+            status_text.write("✅ Processing complete!")
+            
             logger.info(f"Added {len(all_chunks)} chunks from {len(documents)} documents to vector store")
+                    
+            # Save to disk after all batches are processed
+            self._save_index()
+            logger.info(f"Added {len(documents)} documents to vector store")
             
         except Exception as e:
             logger.error(f"Error adding documents: {str(e)}")
@@ -152,42 +165,145 @@ class FAISSVectorStore:
             "documents": documents
         }
 
-    def similarity_search(self, query: str, k: int = 4) -> List[Document]:
-        """Search for similar documents"""
+    def similarity_search(self, query: str, k: int = 4, filter_references: bool = True, buffer_size: int = 5) -> List[Document]:
+        """Return documents most similar to query.
+        
+        Args:
+            query: The search query
+            k: Number of documents to return
+            filter_references: Whether to filter out reference sections
+            buffer_size: Extra documents to retrieve as buffer for filtering
+        """
+        # Get more documents than needed if filtering is enabled
+        search_k = k + buffer_size if filter_references else k
+        
         # Get query embedding
         query_embedding = self.embedding_function.embed_query(query)
-        query_np = np.array([query_embedding]).astype('float32')
         
-        # Search
-        distances, indices = self.index.search(query_np, k)
+        # Convert to numpy array with correct shape
+        xq = np.array([query_embedding], dtype=np.float32)
         
-        # Convert to documents
-        documents = []
-        for idx in indices[0]:
-            if idx != -1 and idx < len(self.metadata):  # -1 indicates no match
-                item = self.metadata[idx]
+        # Search the index
+        D, I = self.index.search(xq, search_k)
+        
+        # Get documents from the index
+        docs = []
+        for idx in I[0]:
+            if idx != -1:  # FAISS returns -1 for empty slots
+                metadata = self.metadata[idx]
                 doc = Document(
-                    page_content=item["content"],
-                    metadata=item["metadata"]
+                    page_content=metadata['content'],
+                    metadata=metadata['metadata']
                 )
-                documents.append(doc)
+                docs.append(doc)
         
-        return documents
+        if filter_references:
+            # Filter out reference sections and get top k
+            content_filter = ContentQualityFilter()
+            docs = content_filter.filter_documents(docs, k)
+        else:
+            # Just take top k if no filtering
+            docs = docs[:k]
+        
+        return docs
+
+    def similarity_search_with_relevance_scores(
+        self, query: str, k: int = 4, filter_references: bool = True, buffer_size: int = 5
+    ) -> List[Tuple[Document, float]]:
+        """Return documents most similar to query along with relevance scores."""
+        # Get embedding for query
+        query_embedding = self.embedding_function.embed_query(query)
+        
+        # Search the FAISS index with buffer for filtering
+        search_k = k * buffer_size if filter_references else k
+        D, I = self.index.search(np.array([query_embedding]), search_k)
+        
+        # Get documents and scores
+        docs = []
+        for i, (dist, idx) in enumerate(zip(D[0], I[0])):
+            if idx == -1:  # This means no more results from FAISS
+                continue
+            doc = Document(
+                page_content=self.metadata[idx]["content"],
+                metadata=self.metadata[idx]["metadata"]
+            )
+            # Convert distance to similarity score
+            similarity = 1.0 - min(1.0, float(dist))
+            docs.append((doc, similarity))
+            
+        # Filter out reference sections if requested
+        if filter_references:
+            content_filter = ContentQualityFilter()
+            filtered_docs = content_filter.filter_documents([doc for doc, _ in docs], k)
+            # Match filtered docs back with their scores
+            filtered_docs_with_scores = []
+            for filtered_doc in filtered_docs:
+                for doc, score in docs:
+                    if doc.page_content == filtered_doc.page_content:
+                        filtered_docs_with_scores.append((filtered_doc, score))
+                        break
+            docs = filtered_docs_with_scores[:k]
+        else:
+            docs = docs[:k]
+        
+        return docs
 
     def as_retriever(self, **kwargs) -> BaseRetriever:
         """Create a retriever from this vector store"""
         return FAISSRetriever(vectorstore=self, **kwargs)
 
 
+class ContentQualityFilter:
+    """Filter document chunks based on content quality."""
+    
+    def __init__(self):
+        from config import OPENAI_API_KEY
+        self.llm = ChatOpenAI(temperature=0, model_name="gpt-4o", openai_api_key=OPENAI_API_KEY)
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a content quality analyzer. Your task is to determine if a given text chunk contains meaningful content or is just references/citations. A chunk is considered a reference section if it primarily consists of bibliographic citations (e.g., author names, journal names, DOIs, publication years, [CrossRef], [PubMed] tags) or if it's a list of numbered references. A chunk is considered content if it contains actual explanatory text about the topic."),
+            ("user", "Analyze this text chunk and respond with ONLY 'reference' or 'content'. Respond with 'reference' if the chunk is primarily citations or bibliography.\n\n{chunk}")
+        ])
+    
+    def is_reference_section(self, chunk: str) -> bool:
+        """Determine if a chunk is just references."""
+        try:
+            result = self.llm(self.prompt.format_messages(chunk=chunk))
+            return result.content.strip().lower() == "reference"
+        except Exception as e:
+            logger.warning(f"Error in content analysis: {e}")
+            return False
+    
+    def filter_documents(self, docs: List[Document], k: int) -> List[Document]:
+        """Filter out reference sections and return top k documents."""
+        filtered_docs = []
+        
+        for doc in docs:
+            if len(filtered_docs) >= k:
+                break
+            
+            if not self.is_reference_section(doc.page_content):
+                filtered_docs.append(doc)
+        
+        return filtered_docs[:k]
+
+
 class FAISSRetriever(BaseRetriever):
-    def __init__(self, vectorstore: FAISSVectorStore, k: int = 4):
+    def __init__(self, vectorstore: FAISSVectorStore, k: int = 4, filter_references: bool = True, buffer_size: int = 5):
         self.vectorstore = vectorstore
         self.k = k
+        self.filter_references = filter_references
+        self.buffer_size = buffer_size
 
     def get_relevant_documents(self, query: str) -> List[Document]:
         """Get documents relevant to a query"""
-        return self.vectorstore.similarity_search(query, k=self.k)
+        docs = self.vectorstore.similarity_search(
+            query, 
+            k=self.k, 
+            filter_references=self.filter_references,
+            buffer_size=self.buffer_size
+        )
+        return docs
 
     async def aget_relevant_documents(self, query: str) -> List[Document]:
         """Get documents relevant to a query async"""
-        return self.get_relevant_documents(query)
+        raise NotImplementedError("Async retrieval not implemented yet")

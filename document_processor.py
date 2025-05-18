@@ -125,23 +125,25 @@ class PaperManager:
             logger.error(f"Error extracting title with LLM: {str(e)}")
             return None
     
-    def process_paper(self, file_path: str) -> Tuple[Optional[str], Optional[str]]:
+    def process_paper(self, file_path: str) -> Tuple[str, str]:
         """Process a single paper and return (title, error)"""
         try:
-            # Extract first page text
+            # Extract text from first page
             first_page_text = self.extract_first_page_text(file_path)
             if not first_page_text:
                 return None, "Failed to extract text from first page"
             
-            # Extract title using LLM
+            # Get title using LLM
             title = self.get_title_from_llm(first_page_text)
             if not title:
-                # Fallback to filename as title
-                filename = os.path.basename(file_path)
-                title = os.path.splitext(filename)[0]
-                return title, "Used filename as title (LLM extraction failed)"
+                # Use filename as fallback title
+                title = os.path.splitext(os.path.basename(file_path))[0]
+            
+            # Clean and standardize the title
+            title = self.clean_title(title)
             
             return title, None
+            
         except Exception as e:
             logger.error(f"Error processing paper {file_path}: {str(e)}")
             return None, str(e)

@@ -405,12 +405,36 @@ def search_query_ui():
         processing_time = st.session_state.search_results.get("processing_time", 0)
         st.caption(f"Processing time: {processing_time:.2f} seconds")
         
-        # Display sources
+        # Display sources with improved formatting
         if st.session_state.search_results.get("sources"):
             st.subheader("Sources")
             sources = st.session_state.search_results["sources"]
-            for i, source in enumerate(sources):
-                st.write(f"{i+1}. {source}")
+            chunks = st.session_state.search_results["chunks"]
+            
+            # Only show chunks that contain actual content (not references)
+            for i, (source, chunk) in enumerate(zip(sources, chunks)):
+                # Skip if chunk appears to be just references
+                if any(ref_marker in chunk.lower() for ref_marker in ['[crossref]', '[pubmed]', 'references:', 'bibliography:']):
+                    continue
+                    
+                # Extract title if present (format: "filename - title")
+                parts = source.split(' - ', 1)
+                filename = parts[0]
+                title = parts[1] if len(parts) > 1 else ''
+                
+                # Create expander with filename as header
+                with st.expander(f"{i+1}. {filename}"):
+                    if title:
+                        st.markdown(f"""<div style='padding: 10px; background-color: #1e1e1e; border-radius: 5px; margin-bottom: 10px;'>
+                        <span style='color: #4CAF50; font-weight: bold;'>Title:</span> 
+                        <span style='color: #ffffff;'>{title}</span>
+                    </div>""", unsafe_allow_html=True)
+                    
+                    # Show chunk content
+                    st.markdown(f"""<div style='padding: 10px; background-color: #1e1e1e; border-radius: 5px;'>
+                    <span style='color: #4CAF50; font-weight: bold;'>Content:</span><br>
+                    <span style='color: #ffffff; font-family: monospace;'>{chunk}</span>
+                </div>""", unsafe_allow_html=True)
     
     with col2:
         # Query history

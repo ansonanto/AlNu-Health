@@ -30,10 +30,15 @@ User Question: {question}
 
 Instructions:
 1. Answer the question based ONLY on the provided context.
-2. If the context doesn't contain enough information to answer the question, say so clearly.
-3. Cite the specific documents you're using in your answer.
-4. Be concise and accurate.
-5. If the question is about medical advice, remind the user that you're providing information from research papers, not personalized medical advice.
+2. IMPORTANT: This is a continuous conversation. Always consider the full conversation history when interpreting the user's question.
+3. If the user's question seems vague or could be interpreted in multiple ways, assume it's related to the previous topic of conversation.
+4. For example, if they previously discussed diabetes and then ask for a "roadmap", interpret this as asking for a roadmap for diabetes management.
+5. If the user refers to something mentioned in a previous exchange, make sure to address it directly.
+6. If the context doesn't contain enough information to answer the question, say so clearly.
+7. Cite the specific documents you're using in your answer.
+8. Be concise and accurate.
+9. If the question is about medical advice, remind the user that you're providing information from research papers, not personalized medical advice.
+10. Always conclude your response with: "Please note that this information is based on research papers and is not personalized medical advice. For personalized guidance, consult a healthcare professional."
 
 Answer:
 """
@@ -60,23 +65,29 @@ def save_prompt(name, prompt_text):
     
     return prompt_id
 
-def delete_prompt(prompt_id):
+def delete_prompt(prompt_id, force=False):
     """Delete a prompt template by its ID"""
     ensure_directories()
     prompt_path = os.path.join(PROMPTS_DIRECTORY, f"{prompt_id}.json")
     
     # First check if there are any evaluations using this prompt
     evaluations = load_evaluations(prompt_id)
-    if evaluations:
+    if evaluations and not force:
         logger.warning(f"Cannot delete prompt {prompt_id} because it has {len(evaluations)} evaluations")
-        return False, f"Cannot delete: This prompt has {len(evaluations)} evaluations. Delete them first."
+        return False, f"Cannot delete: This prompt has {len(evaluations)} evaluations. Delete them first or use force delete."
     
-    # If no evaluations, proceed with deletion
+    # If force is true, delete all evaluations first
+    if evaluations and force:
+        for eval_data in evaluations:
+            delete_evaluation(eval_data['id'])
+        logger.info(f"Deleted {len(evaluations)} evaluations for prompt {prompt_id}")
+    
+    # Proceed with prompt deletion
     if os.path.exists(prompt_path):
         try:
             os.remove(prompt_path)
             logger.info(f"Deleted prompt {prompt_id}")
-            return True, "Prompt deleted successfully!"
+            return True, "Prompt and all associated evaluations deleted successfully!"
         except Exception as e:
             logger.error(f"Error deleting prompt {prompt_id}: {str(e)}")
             return False, f"Error: {str(e)}"
@@ -163,7 +174,30 @@ def load_evaluations(prompt_id=None):
 def test_prompt(prompt_text, query, context):
     """Test a prompt with a query and context"""
     try:
-        # Create prompt template
+        # Create prompt template with default if none provided
+        if not prompt_text:
+            prompt_text = """
+            You are an AI assistant specialized in medical and scientific research. 
+            Answer the user's question based on the provided context from research papers.
+            
+            Context from relevant documents:
+            {context}
+            
+            User Question: {question}
+            
+            Instructions:
+            1. Answer the question based ONLY on the provided context.
+            2. IMPORTANT: This is a continuous conversation. Always consider the full conversation history when interpreting the user's question.
+            3. If the user's question seems vague or could be interpreted in multiple ways, assume it's related to the previous topic of conversation.
+            4. For example, if they previously discussed diabetes and then ask for a "roadmap", interpret this as asking for a roadmap for diabetes management.
+            5. If the user refers to something mentioned in a previous exchange, make sure to address it directly.
+            6. If the context doesn't contain enough information to answer the question, say so clearly.
+            7. Cite the specific documents you're using in your answer.
+            8. Be concise and accurate.
+            9. If the question is about medical advice, remind the user that you're providing information from research papers, not personalized medical advice.
+            10. Always conclude your response with: "Please note that this information is based on research papers and is not personalized medical advice. For personalized guidance, consult a healthcare professional."
+            """
+        
         prompt_template = PromptTemplate(
             template=prompt_text,
             input_variables=["context", "question"]
@@ -199,7 +233,7 @@ def prompt_evaluator_ui():
     """Streamlit interface for prompt testing and evaluation"""
     st.title("Prompt Testing & Evaluation")
     
-    tabs = st.tabs(["Test Prompts", "Manage Prompts", "View Evaluations"])
+    tabs = st.tabs(["Test Prompts", "View Evaluations"])
     
     with tabs[0]:  # Test Prompts
         st.header("Test Different Prompts")
@@ -303,53 +337,7 @@ def prompt_evaluator_ui():
                 
                 st.success(f"Evaluation saved with ID: {eval_id}")
     
-    with tabs[1]:  # Manage Prompts
-        st.header("Manage Prompt Templates")
-        
-        # Create new prompt
-        st.subheader("Create New Prompt Template")
-        new_prompt_name = st.text_input("Prompt Name", "My New Prompt")
-        new_prompt_text = st.text_area("Prompt Template", DEFAULT_SYSTEM_PROMPT, height=300)
-        
-        if st.button("Save New Prompt"):
-            prompt_id = save_prompt(new_prompt_name, new_prompt_text)
-            st.success(f"Prompt saved with ID: {prompt_id}")
-        
-        # List existing prompts
-        st.subheader("Existing Prompt Templates")
-        prompts = load_prompts()
-        
-        if not prompts:
-            st.info("No saved prompts yet. Create one above!")
-        else:
-            for prompt in prompts:
-                with st.expander(f"{prompt['name']} ({prompt['created_at'][:10]})"):
-                    # Create columns for layout - main content and delete button
-                    col1, col2 = st.columns([5, 1])
-                    
-                    with col1:
-                        st.text_area(f"Prompt Template", prompt["text"], height=200, key=prompt["id"], disabled=True)
-                        
-                        # Get evaluation stats for this prompt
-                        evals = load_evaluations(prompt["id"])
-                        if evals:
-                            avg_score = sum(e["score"] for e in evals) / len(evals)
-                            st.info(f"Average score: {avg_score:.1f}/10 from {len(evals)} evaluations")
-                    
-                    with col2:
-                        # Add delete button
-                        prompt_id = prompt["id"]
-                        delete_key = f"delete_prompt_{prompt_id}"
-                        
-                        if st.button("🗑️ Delete", key=delete_key):
-                            success, message = delete_prompt(prompt_id)
-                            if success:
-                                st.success(message)
-                                st.rerun()  # Refresh the page to update the list
-                            else:
-                                st.error(message)
-    
-    with tabs[2]:  # View Evaluations
+    with tabs[1]:  # View Evaluations
         st.header("View Evaluations")
         
         # Filter options

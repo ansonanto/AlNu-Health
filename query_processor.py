@@ -34,8 +34,8 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         
         # Retrieve relevant documents - first try with relevance scores
         try:
-            # Try the similarity_search_with_relevance_scores method
-            retrieval_results = db.similarity_search_with_relevance_scores(query, k=k)
+            # Try the similarity_search_with_relevance_scores method with filtering
+            retrieval_results = db.similarity_search_with_relevance_scores(query, k=k, filter_references=True)
             
             # Log the relevance scores for debugging
             logger.info(f"Query: {query}")
@@ -48,7 +48,8 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
             logger.error(f"Error with similarity_search_with_relevance_scores: {str(e)}")
             logger.info("Falling back to regular similarity_search")
             
-            docs = db.similarity_search(query, k=k)
+            # Use similarity_search with filtering
+            docs = db.similarity_search(query, k=k, filter_references=True)
             # Create a list of tuples (doc, score) with a default score of 0.5
             retrieval_results = [(doc, 0.5) for doc in docs]
             
@@ -70,13 +71,7 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         chunks = []
         
         for doc, score in retrieval_results:
-            # Handle both positive and negative relevance scores
-            # For negative scores (cosine distance), lower absolute values are better
-            # For positive scores (cosine similarity), higher values are better
-            # We'll accept all documents since filtering is causing issues
-            # This ensures we get results even with negative scores
-            pass
-                
+            # Add the document to our collections
             docs.append(doc)
             
             # Create a more informative source entry with title and filename
@@ -92,6 +87,9 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
             # Add chunk information if available
             if "chunk" in doc.metadata and "total_chunks" in doc.metadata:
                 formatted_source += f" (Chunk {doc.metadata['chunk']}/{doc.metadata['total_chunks']})"
+            
+            # Add relevance score to source info
+            formatted_source += f" (Relevance: {score:.2f})"
                 
             sources.append(formatted_source)
             chunks.append(doc.page_content)
@@ -107,7 +105,7 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         
         # Format context for the LLM
         context_text = "\n\n".join([
-            f"Document: {doc.metadata.get('source', 'Unknown')}, Chunk: {doc.metadata.get('chunk', 'Unknown')}\n{doc.page_content}"
+            f"Document: {doc.metadata.get('title', doc.metadata.get('source', 'Unknown'))}\n{doc.page_content}"
             for doc in docs
         ])
         
@@ -251,11 +249,15 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         # Calculate processing time
         processing_time = time.time() - start_time
         
+        # Get all retrieved documents
+        used_docs = [doc.metadata.get('title', doc.metadata.get('source', 'Unknown')) for doc in docs]
+        used_chunks = [doc.page_content for doc in docs]
+        
         # Return response and metadata
         return {
             "response": response,
-            "sources": sources,
-            "chunks": chunks,
+            "sources": used_docs,
+            "chunks": used_chunks,
             "processing_time": processing_time
         }
     except Exception as e:
