@@ -1,21 +1,33 @@
+# Must be the first import
+import streamlit as st
+
+# Set page config - must be the first Streamlit command
+st.set_page_config(
+    page_title="AlNu Health - RAG Document Search System",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Standard library imports
 import os
 import time
-import logging
-import streamlit as st
-import openai
 import json
-from PIL import Image
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
+# Third-party imports
+from PIL import Image
+import openai
+
 # Import configuration
-from config import OPENAI_API_KEY, CHROMA_PATH, GEMINI_API_KEY
+from config import OPENAI_API_KEY, GEMINI_API_KEY, VECTOR_STORE_PATH
 
 # Import utility functions
-from utils import verify_chroma_persistence, reset_chroma
 from document_processor import process_documents, PaperManager
-from vector_db import initialize_chroma, create_vector_db, check_db_status
+from vector_db import initialize_vector_db, create_vector_db, check_db_status
 from query_processor import query_documents
 from pubmed_downloader import pubmed_downloader_ui
 from prompt_evaluator import prompt_evaluator_ui
@@ -28,47 +40,50 @@ logger = logging.getLogger(__name__)
 # Configure OpenAI API key
 openai.api_key = OPENAI_API_KEY
 
-# Set page configuration
-st.set_page_config(
-    page_title="AlNu Health - RAG Document Search System",
-    page_icon="📚",
-    layout="wide"
-)
+def initialize_session_state():
+    """Initialize session state variables if they don't exist"""
+    if 'processed_docs' not in st.session_state:
+        st.session_state.processed_docs = False
+    if 'db' not in st.session_state:
+        st.session_state.db = None
+    if 'documents' not in st.session_state:
+        st.session_state.documents = []
+    if 'new_documents' not in st.session_state:
+        st.session_state.new_documents = []
+    if 'last_processed_time' not in st.session_state:
+        st.session_state.last_processed_time = None
+    if 'db_status' not in st.session_state:
+        st.session_state.db_status = "Not initialized"
+    if 'search_results' not in st.session_state:
+        st.session_state.search_results = None
+    if 'accuracy_percentage' not in st.session_state:
+        st.session_state.accuracy_percentage = None
+    if 'query_history' not in st.session_state:
+        st.session_state.query_history = []
+    if 'vector_store' not in st.session_state:
+        st.session_state.vector_store = None
+    if 'selected_document' not in st.session_state:
+        st.session_state.selected_document = None
+    if 'current_tab' not in st.session_state:
+        st.session_state.current_tab = "Document Management"
 
 # Initialize session state variables if they don't exist
-if 'processed_docs' not in st.session_state:
-    st.session_state.processed_docs = False
-if 'db' not in st.session_state:
-    st.session_state.db = None
-if 'documents' not in st.session_state:
-    st.session_state.documents = []
-if 'embeddings' not in st.session_state:
-    st.session_state.embeddings = None
-if 'db_status' not in st.session_state:
-    st.session_state.db_status = "Not initialized"
-if 'query_history' not in st.session_state:
-    st.session_state.query_history = []
-if 'new_documents' not in st.session_state:
-    st.session_state.new_documents = []
-if 'last_processed_time' not in st.session_state:
-    st.session_state.last_processed_time = None
-if 'chroma_instance' not in st.session_state:
-    st.session_state.chroma_instance = None
-    
+initialize_session_state()
+
 # Try to initialize the vector database on startup
 try:
-    # Check if the database directory exists and has content
-    if verify_chroma_persistence(CHROMA_PATH):
+    # Check for existing vector store at startup
+    if os.path.exists(os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")):
         logger.info("Found existing vector database, attempting to load")
         # Initialize the database
-        db = initialize_chroma()
+        db = initialize_vector_db()
         if db is not None:
             st.session_state.db = db
             st.session_state.processed_docs = True
-            st.session_state.db_status = "Ready"
-            logger.info("Successfully loaded existing vector database")
+            st.session_state.db_status = "Vector database loaded successfully"
         else:
-            logger.warning("Failed to load existing vector database")
+            st.session_state.processed_docs = False
+            st.session_state.db_status = "Failed to load vector database"
     else:
         logger.info("No existing vector database found or verification failed")
 except Exception as e:
@@ -89,10 +104,41 @@ if 'current_tab' not in st.session_state:
 if 'processed_docs' not in st.session_state:
     st.session_state.processed_docs = False
 
+def save_query_history():
+    """Save query history to disk"""
+    history_path = os.path.join(VECTOR_STORE_PATH, "query_history.json")
+    try:
+        if 'query_history' in st.session_state:
+            with open(history_path, 'w') as f:
+                json.dump(st.session_state.query_history, f)
+            logger.info("Query history saved successfully")
+    except Exception as e:
+        logger.error(f"Error saving query history: {str(e)}")
+
+def load_query_history():
+    """Load query history from disk"""
+    history_path = os.path.join(VECTOR_STORE_PATH, "query_history.json")
+    try:
+        if os.path.exists(history_path):
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+            st.session_state.query_history = history
+            logger.info("Query history loaded successfully")
+    except Exception as e:
+        logger.error(f"Error loading query history: {str(e)}")
+        st.session_state.query_history = []
+
 def main():
     """Main application UI"""
+    # Initialize session state
+    initialize_session_state()
+    
+    # Load query history
+    if 'query_history' not in st.session_state:
+        load_query_history()
+    
     # Display header
-    st.title("AlNu Health - Medical Research RAG System")
+    st.title("🏥 AlNu Health - Medical Research RAG System")
     
     # Create tabs for different functionalities
     tabs = ["Document Management", "Search & Query", "PubMed Downloader", "Prompt Evaluator"]
@@ -110,7 +156,7 @@ def main():
     
     # Display footer
     st.markdown("---")
-    st.markdown("AlNu Health - Medical Research RAG System © 2025")
+    st.markdown("AlNu Health - Medical Research RAG System 2025")
 
 def document_management_ui():
     """UI for document management tab"""
@@ -150,12 +196,19 @@ def document_management_ui():
         
         # Reset database button
         if st.button("Reset Database"):
-            if reset_chroma():
-                # Clear session state
+            # Initialize vector store with reset flag
+            if initialize_vector_db(reset_db=True):
+                # Clear all relevant session state except query history
                 st.session_state.db = None
                 st.session_state.processed_docs = False
-                st.session_state.chroma_instance = None
+                st.session_state.vector_store = None
+                st.session_state.documents = []
+                st.session_state.new_documents = []
+                st.session_state.last_processed_time = None
+                st.session_state.db_status = "Not initialized"
+                
                 st.success("Vector database reset successfully")
+                st.experimental_rerun()
             else:
                 st.error("Failed to reset vector database")
         
@@ -217,14 +270,16 @@ def search_query_ui():
             # First check if we need to initialize the database
             if st.session_state.db is None:
                 # Try to initialize the database if it exists
-                if verify_chroma_persistence(CHROMA_PATH):
+                if os.path.exists(os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")):
                     logger.info("Attempting to initialize vector database for search")
-                    db = initialize_chroma()
+                    db = initialize_vector_db()
                     if db is not None:
                         st.session_state.db = db
                         st.session_state.processed_docs = True
-                        st.session_state.db_status = "Ready"
-                        logger.info("Successfully initialized vector database for search")
+                        st.session_state.db_status = "Vector database loaded successfully"
+                    else:
+                        st.session_state.processed_docs = False
+                        st.session_state.db_status = "Failed to load vector database"
             
             # Check if documents have been processed
             if not st.session_state.processed_docs or st.session_state.db is None:
@@ -324,20 +379,21 @@ def search_query_ui():
                         # Format and display the results
                         format_macro_display(macros)
                         
-                        # Add to query history
+                        # Add to query history and save
                         st.session_state.query_history.append({
                             "user": "[Food Image Analysis]",
                             "assistant": message,
                             "food_image": True,
                             "macros": macros
                         })
+                        save_query_history()
                     else:
                         st.error(message)
 
     # Display results (outside both tabs)
     if st.session_state.search_results:
         st.subheader("Answer")
-        
+                
         # Display accuracy percentage
         if st.session_state.accuracy_percentage:
             st.info(f"Response Confidence: {st.session_state.accuracy_percentage}%")
@@ -359,7 +415,7 @@ def search_query_ui():
     with col2:
         # Query history
         st.subheader("Query History")
-        
+                
         if st.session_state.query_history:
             for i, exchange in enumerate(st.session_state.query_history):
                 # Customize display for food image analysis
@@ -384,6 +440,7 @@ def search_query_ui():
         # Clear history button
         if st.button("Clear History"):
             st.session_state.query_history = []
+            save_query_history()
             st.success("Query history cleared")
 
 if __name__ == "__main__":

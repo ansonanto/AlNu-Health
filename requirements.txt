@@ -9,7 +9,7 @@ pdfplumber>=0.10.4
 # pyxpdf removed due to compatibility issues with Streamlit hosting
 
 # Vector database
-chromadb>=0.4.22
+faiss-cpu>=1.7.4
 
 # LangChain and related packages
 # Using compatible versions to avoid dependency conflicts

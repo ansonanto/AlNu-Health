@@ -18,8 +18,10 @@ class PaperManager:
     def __init__(self):
         """Initialize the paper manager"""
         self.vectorstore = None
-        if 'chroma_instance' in st.session_state:
-            self.vectorstore = st.session_state.chroma_instance
+        if 'vector_store' in st.session_state:
+            self.vectorstore = st.session_state.vector_store
+        elif 'db' in st.session_state:
+            self.vectorstore = st.session_state.db
     
     def clean_title(self, title: str) -> str:
         """Clean and standardize paper title format."""
@@ -55,8 +57,8 @@ class PaperManager:
         """Get paper counts and titles with improved reliability"""
         try:
             if not self.vectorstore:
-                if 'chroma_instance' in st.session_state:
-                    self.vectorstore = st.session_state.chroma_instance
+                if 'db' in st.session_state:
+                    self.vectorstore = st.session_state.db
                 else:
                     return 0, []
             
@@ -65,9 +67,10 @@ class PaperManager:
             
             # Extract unique document sources
             unique_sources = set()
-            for metadata in all_docs.get('metadatas', []):
-                if metadata and 'source' in metadata:
-                    unique_sources.add(metadata['source'])
+            if all_docs and 'metadatas' in all_docs:
+                for metadata in all_docs['metadatas']:
+                    if metadata and isinstance(metadata, dict) and 'source' in metadata:
+                        unique_sources.add(metadata['source'])
             
             return len(unique_sources), list(unique_sources)
         except Exception as e:

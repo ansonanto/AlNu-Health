@@ -2,289 +2,116 @@ import os
 import time
 import logging
 import streamlit as st
-import sqlite3
-import sys
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from typing import List, Dict, Any, Optional, Union
+from langchain.docstore.document import Document
 
 from embeddings import CustomOpenAIEmbeddings
-from config import OPENAI_API_KEY, CHROMA_PATH
-from utils import verify_chroma_persistence
-
-# Check if we can use ChromaDB (requires SQLite >= 3.35.0)
-SQLITE_VERSION = sqlite3.sqlite_version_info
-MIN_SQLITE_VERSION = (3, 35, 0)
-CAN_USE_CHROMA = SQLITE_VERSION >= MIN_SQLITE_VERSION
-
-# Only import Chroma if SQLite version is compatible
-if CAN_USE_CHROMA:
-    try:
-        from langchain_community.vectorstores import Chroma
-        CHROMA_IMPORT_ERROR = None
-    except ImportError as e:
-        CHROMA_IMPORT_ERROR = str(e)
-        CAN_USE_CHROMA = False
-else:
-    CHROMA_IMPORT_ERROR = f"SQLite version {SQLITE_VERSION} is not compatible with ChromaDB (requires >= {MIN_SQLITE_VERSION})"
+from config import OPENAI_API_KEY, VECTOR_STORE_PATH
+from faiss_store import FAISSVectorStore
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def initialize_chroma(reset_db=False) -> Optional[Any]:
-    """Initialize ChromaDB with proper handling for conflicts and SQLite version issues"""
-    # If we already have an instance in session state and we're not resetting, return it
-    if not reset_db and 'chroma_instance' in st.session_state and st.session_state.chroma_instance is not None:
-        return st.session_state.chroma_instance
-    
-    # Check if ChromaDB can be used on this system
-    if not CAN_USE_CHROMA:
-        error_msg = CHROMA_IMPORT_ERROR or f"SQLite version {SQLITE_VERSION} is not compatible with ChromaDB"
-        logger.error(f"Failed to initialize vector database: {error_msg}")
-        st.session_state.db_status = f"Error: {error_msg}"
-        st.session_state.chroma_instance = None
-        st.session_state.db = None
-        return None
-    
-    # If reset_db is True, delete the ChromaDB directory
-    if reset_db and os.path.exists(CHROMA_PATH):
-        import shutil
-        try:
-            logger.info(f"Resetting ChromaDB directory at {CHROMA_PATH}")
-            # Create a backup directory
-            backup_dir = f"{CHROMA_PATH}_backup_{int(time.time())}"
-            if os.path.exists(CHROMA_PATH):
-                shutil.copytree(CHROMA_PATH, backup_dir)
-                logger.info(f"Created backup at {backup_dir}")
-            # Remove the original directory
-            shutil.rmtree(CHROMA_PATH)
-            logger.info("ChromaDB directory reset successfully")
-        except Exception as e:
-            logger.error(f"Error resetting ChromaDB directory: {str(e)}")
-    
-    # Check if ChromaDB directory exists - if it does, we'll try to load from it instead of resetting
-    chroma_exists = os.path.exists(CHROMA_PATH) and len(os.listdir(CHROMA_PATH)) > 0
-    logger.info(f"ChromaDB directory exists: {chroma_exists}")
-    
+def delete_vector_store():
+    """Delete the vector store files"""
     try:
-        # Use our custom OpenAI embeddings implementation
-        embedding_function = CustomOpenAIEmbeddings(api_key=OPENAI_API_KEY)
-        logger.info("Successfully initialized CustomOpenAIEmbeddings")
+        index_path = os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")
+        metadata_path = os.path.join(VECTOR_STORE_PATH, "metadata.pkl")
         
-        # Initialize Chroma with proper settings using the updated langchain-chroma package
-        try:
-            # Ensure the directory exists
-            os.makedirs(CHROMA_PATH, exist_ok=True)
+        # Delete files if they exist
+        if os.path.exists(index_path):
+            os.remove(index_path)
+        if os.path.exists(metadata_path):
+            os.remove(metadata_path)
             
-            # Create a simple Chroma instance without any client settings
-            vectorstore = Chroma(
-                persist_directory=CHROMA_PATH,
-                embedding_function=embedding_function,
-                collection_name="documents"
-            )
-            
-            # Store in session state
-            st.session_state.chroma_instance = vectorstore
-            st.session_state.db = vectorstore  # Also store as db for compatibility
-            st.session_state.db_status = "Initialized"
-            logger.info("Successfully initialized ChromaDB instance")
-            
-            # Return the instance
-            return vectorstore
-            
-        except Exception as e:
-            error_str = str(e)
-            logger.error(f"Error in initialize_chroma: {error_str}")
-            
-            # Check for tenant error which indicates a corrupted database
-            if "tenant" in error_str.lower() and "default_tenant" in error_str.lower() and not reset_db:
-                logger.warning("Detected tenant connection issue. Attempting to reset the database...")
-                # Try to reset and reinitialize
-                return initialize_chroma(reset_db=True)
-            
-            st.session_state.db_status = f"Error: {error_str}"
-            st.session_state.chroma_instance = None
-            st.session_state.db = None
-            return None
-    except Exception as e:
-        error_str = str(e)
-        logger.error(f"Error in initialize_chroma: {error_str}")
-        
-        # Check for tenant error which indicates a corrupted database
-        if "tenant" in error_str.lower() and "default_tenant" in error_str.lower() and not reset_db:
-            logger.warning("Detected tenant connection issue. Attempting to reset the database...")
-            # Try to reset and reinitialize
-            return initialize_chroma(reset_db=True)
-        
-        st.session_state.db_status = f"Error: {error_str}"
-        st.session_state.chroma_instance = None
-        st.session_state.db = None
-        return None
-        
-        # Initialize Chroma with proper settings using the updated langchain-chroma package
-        try:
-            # Ensure the directory exists
-            os.makedirs(CHROMA_PATH, exist_ok=True)
-            
-            # Create a simple Chroma instance without any client settings
-            vectorstore = Chroma(
-                persist_directory=CHROMA_PATH,
-                embedding_function=embedding_function,
-                collection_name="documents"
-            )
-            
-            # Store in session state
-            st.session_state.chroma_instance = vectorstore
-            st.session_state.db = vectorstore  # Also store as db for compatibility
-            st.session_state.db_status = "Initialized"
-            logger.info("Successfully initialized ChromaDB instance")
-            
-            # Return the instance
-            return vectorstore
-            
-        except Exception as e:
-            logger.error(f"Error initializing ChromaDB: {str(e)}")
-            # Try a fallback approach
-            try:
-                # Direct import here to avoid any global configuration issues
-                import chromadb
-                
-                # Create a new client without any proxy settings
-                client = chromadb.PersistentClient(
-                    path=CHROMA_PATH
-                )
-                
-                # Create a new collection
-                vectorstore = Chroma(
-                    client=client,
-                    collection_name="documents",
-                    embedding_function=embedding_function
-                )
-                
-                # Store in session state
-                st.session_state.chroma_instance = vectorstore
-                st.session_state.db_status = "Initialized (fallback)"
-                
-                logger.info("Successfully created ChromaDB instance using fallback method")
-                return vectorstore
-            except Exception as inner_e:
-                logger.error(f"Error creating ChromaDB with fallback method: {str(inner_e)}")
-                st.error(f"Failed to initialize vector database: {str(inner_e)}")
-                st.session_state.db_status = "Failed to initialize"
-                return None
-    except Exception as e:
-        logger.error(f"Error in initialize_chroma: {str(e)}")
-        st.error(f"Failed to initialize vector database: {str(e)}")
-        st.session_state.db_status = "Failed to initialize"
-        return None
-
-def create_vector_db(documents, update_existing=False):
-    """Create or update vector database from documents"""
-    try:
-        # Start timer
-        start_time = time.time()
-        
-        # Check if we have a valid ChromaDB instance
-        if st.session_state.chroma_instance is None:
-            st.session_state.chroma_instance = initialize_chroma()
-            if st.session_state.chroma_instance is None:
-                st.error("Failed to initialize vector database")
-                return None
-        
-        # Create text splitter for chunking
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-            separators=["\n\n", "\n", " ", ""]
-        )
-        
-        # Setup progress tracking
-        total_docs = len(documents)
-        st.write(f"Creating vector database for {total_docs} documents...")
-        
-        # Create progress bar
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        # Process each document
-        for i, doc in enumerate(documents):
-            # Update progress
-            progress_percent = i / total_docs
-            progress_bar.progress(progress_percent)
-            status_text.write(f"Embedding document {i+1}/{total_docs}: {doc.get('name', 'unknown')}")
-            
-            # Skip if document is empty
-            if not doc.get('content'):
-                logger.warning(f"Empty content for document: {doc.get('name')}")
-                continue
-            
-            # Create document chunks
-            chunks = text_splitter.split_text(doc['content'])
-            
-            # Create metadata for each chunk
-            metadatas = [
-                {
-                    "source": doc.get('name', 'unknown'),
-                    "chunk": i,
-                    "document_id": doc.get('name', 'unknown'),
-                }
-                for i in range(len(chunks))
-            ]
-            
-            # Add chunks to vector store
-            st.session_state.chroma_instance.add_texts(
-                texts=chunks,
-                metadatas=metadatas
-            )
-        
-        # Complete the progress bar
-        progress_bar.progress(1.0)
-        status_text.write(f"✅ Vector database creation complete! Processed {total_docs} documents.")
-        
-        # Persist changes
-        st.session_state.chroma_instance.persist()
-        
-        # Update session state
-        st.session_state.processed_docs = True
-        st.session_state.last_processed_time = time.time()
-        
-        # Calculate processing time
-        processing_time = time.time() - start_time
-        logger.info(f"Vector database created in {processing_time:.2f} seconds")
-        
-        return st.session_state.chroma_instance
-    except Exception as e:
-        logger.error(f"Error creating vector database: {str(e)}")
-        st.error(f"Error creating vector database: {str(e)}")
-        return None
-
-def check_db_status():
-    """Check ChromaDB status and reprocess if needed"""
-    try:
-        # Check if ChromaDB directory exists and has valid content
-        if not verify_chroma_persistence(CHROMA_PATH):
-            logger.warning("ChromaDB persistence verification failed")
-            st.warning("Vector database needs to be reinitialized. Please process your documents again.")
-            st.session_state.db_status = "Needs reinitialization"
-            st.session_state.processed_docs = False
-            return False
-        
-        # Check if we have a valid ChromaDB instance
-        if 'chroma_instance' not in st.session_state or st.session_state.chroma_instance is None:
-            logger.info("Initializing ChromaDB instance")
-            st.session_state.chroma_instance = initialize_chroma()
-            if st.session_state.chroma_instance is None:
-                st.warning("Failed to initialize vector database. Please process your documents again.")
-                st.session_state.db_status = "Failed to initialize"
-                st.session_state.processed_docs = False
-                return False
-        
-        # Update status
-        st.session_state.db_status = "Ready"
+        logger.info("Vector store files deleted successfully")
         return True
     except Exception as e:
-        logger.error(f"Error checking DB status: {str(e)}")
-        st.error(f"Error checking database status: {str(e)}")
-        st.session_state.db_status = "Error"
+        logger.error(f"Error deleting vector store files: {str(e)}")
+        return False
+
+def initialize_vector_db(reset_db=False) -> Optional[FAISSVectorStore]:
+    """Initialize FAISS vector store"""
+    # If resetting, delete existing files
+    if reset_db:
+        if not delete_vector_store():
+            return None
+    
+    # If we already have an instance in session state and we're not resetting, return it
+    if not reset_db and 'vector_store' in st.session_state and st.session_state.vector_store is not None:
+        return st.session_state.vector_store
+    
+    try:
+        # Initialize embedding function
+        embedding_function = CustomOpenAIEmbeddings()
+        
+        # Create vector store
+        vector_store = FAISSVectorStore(embedding_function, VECTOR_STORE_PATH)
+        
+        # Store in session state
+        st.session_state.vector_store = vector_store
+        st.session_state.db_status = "Vector store initialized successfully"
+        
+        return vector_store
+    except Exception as e:
+        error_msg = f"Failed to initialize vector store: {str(e)}"
+        logger.error(error_msg)
+        st.session_state.db_status = f"Error: {error_msg}"
+        st.session_state.vector_store = None
+        return None
+
+def create_vector_db(documents: List[Dict[str, Any]], update_existing: bool = False) -> bool:
+    """Create or update vector database from documents"""
+    try:
+        # Initialize vector store
+        vector_store = initialize_vector_db(reset_db=update_existing)
+        if not vector_store:
+            return False
+
+        # Convert documents to LangChain Document format
+        doc_objects = []
+        for doc in documents:
+            metadata = {
+                'source': doc.get('name', 'unknown'),
+                'document_id': doc.get('name', 'unknown')
+            }
+            metadata.update(doc.get('metadata', {}))
+            
+            doc_objects.append(Document(
+                page_content=doc.get('content', ''),
+                metadata=metadata
+            ))
+
+        # Add documents to vector store
+        vector_store.add_documents(doc_objects, update_existing=update_existing)
+
+        # Update session state
+        st.session_state.db_status = "Vector database created successfully"
+        return True
+
+    except Exception as e:
+        logger.error(f"Error creating vector database: {str(e)}")
+        st.session_state.db_status = f"Error: {str(e)}"
+        return False
+def check_db_status() -> bool:
+    """Check vector store status"""
+    try:
+        # Check if vector store exists
+        if not os.path.exists(os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")):
+            logger.info("No existing vector store found")
+            return False
+
+        # Try to initialize vector store
+        if initialize_vector_db():
+            st.session_state.db_status = "Vector store loaded successfully"
+            return True
+        else:
+            logger.warning("Vector store initialization failed")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error checking vector store status: {str(e)}")
+        st.session_state.db_status = f"Error: {str(e)}"
         return False

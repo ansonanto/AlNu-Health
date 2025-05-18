@@ -12,7 +12,7 @@ EMAIL_ID = os.getenv("EMAIL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Default paths and settings
-CHROMA_PATH = "./chroma_db"
+VECTOR_STORE_PATH = "./simple_vector_storage"
 MODEL_NAME = "gpt-4o"
 EMBEDDING_MODEL = "text-embedding-3-small"
 

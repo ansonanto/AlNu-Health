@@ -5,14 +5,11 @@ import streamlit as st
 import openai
 
 # Import configuration
-from config import OPENAI_API_KEY, CHROMA_PATH
-
-# Import utility functions
-from utils import reset_chroma, verify_chroma_persistence
+from config import OPENAI_API_KEY, GEMINI_API_KEY, VECTOR_STORE_PATH
 
 # Import modules
 from document_processor import PaperManager, process_documents
-from vector_db import initialize_chroma, create_vector_db, check_db_status
+from vector_db import initialize_vector_db, create_vector_db, check_db_status
 from query_processor import query_documents, generate_accuracy_percentage
 from pubmed_downloader import pubmed_downloader_ui
 from prompt_evaluator import prompt_evaluator_ui
@@ -68,30 +65,29 @@ if 'processed_docs' not in st.session_state:
 
 def main():
     """Main application UI"""
-    # Check for existing ChromaDB data at startup
+    # Check for existing vector store at startup
     if 'db_initialized' not in st.session_state:
-        # Initialize ChromaDB
-        db = initialize_chroma()
+        # Initialize vector store
+        db = initialize_vector_db()
         
         # Check if the database has documents
         try:
-            # Try to get the collection count
-            if db and hasattr(db, '_collection'):
-                count = db._collection.count()
-                logger.info(f"Found {count} documents in ChromaDB at startup")
-                
-                if count > 0:
-                    # Database exists and has documents
-                    st.session_state.db = db
-                    st.session_state.processed_docs = True
-                    st.session_state.db_status = "Healthy (Loaded from disk)"
-                    logger.info("Successfully loaded existing ChromaDB database")
+            if db is not None:
+                st.session_state.db = db
+                st.session_state.db_initialized = True
+                st.session_state.db_status = "Vector store loaded successfully"
+            else:
+                st.session_state.db_initialized = False
+                st.session_state.db_status = "Vector store not initialized"
         except Exception as e:
-            logger.error(f"Error checking ChromaDB at startup: {str(e)}")
-            
-        # If ChromaDB initialization failed, set appropriate status
+            logger.error(f"Error initializing vector store: {str(e)}")
+            st.session_state.db_initialized = False
+            st.session_state.db_status = f"Error: {str(e)}"
+        
+        # If vector store initialization failed, set appropriate status
         if 'db_status' in st.session_state and st.session_state.db_status and st.session_state.db_status.startswith("Error"):
-            logger.warning("ChromaDB initialization failed, some features will be limited")
+            logger.warning("Vector store initialization failed, some features will be limited")
+            st.warning("Vector store initialization failed. Some features may be limited.")
         
         # Mark as initialized so we don't check again
         st.session_state.db_initialized = True
