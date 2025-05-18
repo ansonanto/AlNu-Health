@@ -16,6 +16,7 @@ from vector_db import initialize_chroma, create_vector_db, check_db_status
 from query_processor import query_documents, generate_accuracy_percentage
 from pubmed_downloader import pubmed_downloader_ui
 from prompt_evaluator import prompt_evaluator_ui
+from keyword_availability import keyword_availability_ui
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -99,7 +100,7 @@ def main():
     st.title("AlNu Health - Medical Research RAG System")
     
     # Create tabs for different functionalities
-    tabs = ["Document Management", "Search & Query", "PubMed Downloader", "Prompt Evaluator"]
+    tabs = ["Document Management", "Search & Query", "PubMed Downloader", "Prompt Evaluator", "Keyword Availability"]
     st.session_state.current_tab = st.radio("Select Functionality:", tabs, horizontal=True)
     
     # Check if ChromaDB is available and show warning if not
@@ -122,6 +123,8 @@ def main():
         pubmed_downloader_ui()
     elif st.session_state.current_tab == "Prompt Evaluator":
         prompt_evaluator_ui()
+    elif st.session_state.current_tab == "Keyword Availability":
+        keyword_availability_ui()
     
     # Display footer
     st.markdown("---")
