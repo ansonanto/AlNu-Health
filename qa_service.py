@@ -4,7 +4,7 @@ import logging
 import json
 from typing import List, Dict, Optional, Tuple, Any
 from datetime import datetime
-from google import genai
+import google.genai as genai
 from pathlib import Path
 from google.genai.types import GenerateContentConfig, GoogleSearch, Tool, EmbedContentConfig
 
