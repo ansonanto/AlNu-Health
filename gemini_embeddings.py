@@ -2,8 +2,7 @@ import logging
 import random
 import time
 from typing import List, Union, Any
-from google import genai
-from google.genai.types import EmbedContentConfig
+import google.generativeai as genai
 from langchain.embeddings.base import Embeddings
 from config import GEMINI_API_KEY, EMBEDDING_DIMENSION
 
@@ -28,9 +27,7 @@ class GeminiEmbeddings(Embeddings):
             raise ValueError("Gemini API key is required. Set GEMINI_API_KEY in config or pass api_key parameter.")
         
         # Initialize the Gemini client
-        self.client = genai.Client(api_key=self.api_key)
-        
-        # The embedding model - use the correct model name with prefix
+        genai.configure(api_key=self.api_key)
         self.embedding_model = "models/embedding-001"
         
         # Set the output dimension from config if not specified
@@ -55,7 +52,7 @@ class GeminiEmbeddings(Embeddings):
         except Exception as e:
             logger.error(f"Connection test failed: {str(e)}")
     
-    def _embed_with_retry(self, text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> List[float]:
+    def _embed_with_retry(self, text: str, task_type: str = "retrieval_document") -> List[float]:
         """Embed text with retry logic."""
         last_exception = None
         
@@ -69,44 +66,29 @@ class GeminiEmbeddings(Embeddings):
                 text = text.strip()
                 
                 # Make API call with correct parameters
-                response = self.client.models.embed_content(
-                    model=self.embedding_model,
-                    contents=[text],  # Must be a list, not a string
-                    config=EmbedContentConfig(
-                        task_type=task_type,
-                        output_dimensionality=self.output_dim,
-                    )
-                )
+                embed_args = {
+                    "model": self.embedding_model,
+                    "content": text,
+                    "task_type": task_type,
+                }
+                if task_type == "retrieval_document":
+                    embed_args["title"] = "Custom query"
+                response = genai.embed_content(**embed_args)
                 
                 # Access the embedding correctly
-                if hasattr(response, 'embeddings') and response.embeddings:
-                    # embeddings is a list, get the first one
-                    embedding = response.embeddings[0]
-                    if hasattr(embedding, 'values'):
-                        return embedding.values
-                    else:
-                        # If it's already a list of floats
-                        return embedding
+                embedding = response.get("embedding")
+                if embedding:
+                    return embedding
                 else:
-                    raise ValueError("No embeddings found in response")
+                    raise ValueError("No embedding found in Gemini API response.")
                     
             except Exception as e:
+                logger.warning(f"Attempt {attempt+1} failed: {e}")
                 last_exception = e
-                logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
-                
-                # If it's a rate limit error, wait longer
-                if "429" in str(e) or "quota" in str(e).lower():
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    logger.info(f"Rate limit hit, waiting {wait_time:.2f} seconds...")
-                    time.sleep(wait_time)
-                elif attempt < self.max_retries - 1:
-                    # For other errors, wait a shorter time
-                    wait_time = 1 + random.uniform(0, 1)
-                    time.sleep(wait_time)
         
         # If all retries failed, log the error and return fallback
-        logger.error(f"All {self.max_retries} attempts failed. Last error: {str(last_exception)}")
-        return self._get_fallback_embedding()
+        logger.error(f"All {self.max_retries} attempts failed. Last error: {last_exception}")
+        return [0.0] * self.output_dim
     
     def _get_fallback_embedding(self) -> List[float]:
         """Generate a fallback embedding when API calls fail."""
@@ -126,7 +108,7 @@ class GeminiEmbeddings(Embeddings):
             # Process each text individually as Gemini embedding API processes one at a time
             for i, text in enumerate(texts):
                 try:
-                    embedding = self._embed_with_retry(text, task_type="RETRIEVAL_DOCUMENT")
+                    embedding = self._embed_with_retry(text, task_type="retrieval_document")
                     embeddings.append(embedding)
                     
                     # Log progress for large batches
@@ -179,7 +161,7 @@ class GeminiEmbeddings(Embeddings):
             logger.debug(f"Embedding query: {text[:50]}...")
             
             # Use RETRIEVAL_QUERY task type for queries
-            embedding = self._embed_with_retry(text, task_type="RETRIEVAL_QUERY")
+            embedding = self._embed_with_retry(text, task_type="retrieval_query")
             
             logger.debug(f"Successfully embedded query, dimension: {len(embedding)}")
             return embedding

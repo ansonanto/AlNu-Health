@@ -5,11 +5,6 @@ import uuid
 import logging
 import streamlit as st
 from datetime import datetime
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from typing import List, Dict, Any, Optional
 from gemini_services import gemini_service
 from qa_service import QAService, qa_service
 from firebase_helpers import save_evaluation_firestore, fetch_evaluations_from_firestore
@@ -154,77 +149,6 @@ def load_evaluations(prompt_id=None):
     # Sort by creation date (newest first)
     evaluations.sort(key=lambda x: x.get('created_at', ''), reverse=True)
     return evaluations
-
-def test_prompt(prompt_text, query, context):
-    """Test a prompt with a query and context"""
-    try:
-        # Create prompt template with default if none provided
-        if not prompt_text:
-            prompt_text = """
-            You are an AI assistant specialized in medical and scientific research. 
-            Answer the user's question based on the provided context from research papers.
-            
-            Context from relevant documents:
-            {context}
-            
-            User Question: {question}
-            
-            Instructions:
-            1. Answer the question based ONLY on the provided context.
-            2. IMPORTANT: This is a continuous conversation. Always consider the full conversation history when interpreting the user's question.
-            3. If the user's question seems vague or could be interpreted in multiple ways, assume it's related to the previous topic of conversation.
-            4. For example, if they previously discussed diabetes and then ask for a "roadmap", interpret this as asking for a roadmap for diabetes management.
-            5. If the user refers to something mentioned in a previous exchange, make sure to address it directly.
-            6. If the context doesn't contain enough information to answer the question, say so clearly.
-            7. Cite the specific documents you're using in your answer.
-            8. Be concise and accurate.
-            9. If the question is about medical advice, remind the user that you're providing information from research papers, not personalized medical advice.
-            10. Always conclude your response with: "Please note that this information is based on research papers and is not personalized medical advice. For personalized guidance, consult a healthcare professional."
-            """
-        
-        prompt_template = PromptTemplate(
-            template=prompt_text,
-            input_variables=["context", "question"]
-        )
-        
-        # Initialize the Gemini LLM
-        # Ensure we're explicitly using the Gemini API key
-        if not GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY is not set. Please set it in your environment variables or secrets.")
-            
-        llm = ChatGoogleGenerativeAI(
-            model=MODEL_NAME,
-            temperature=GEMINI_CONFIG.get("temperature", 0.0),
-            top_p=GEMINI_CONFIG.get("top_p", 0.95),
-            # top_k must be positive, so we'll use 40 as a default value
-            top_k=40,  # Default value that works well
-            max_output_tokens=GEMINI_CONFIG.get("max_output_tokens", 2048),
-            google_api_key=GEMINI_API_KEY
-        )
-        
-        # Create chain using the new RunnableSequence pattern
-        chain = (
-            {"context": RunnablePassthrough(), "question": RunnablePassthrough()}
-            | prompt_template
-            | llm
-            | StrOutputParser()
-        )
-        
-        # Execute chain
-        start_time = time.time()
-        response = chain.invoke({"context": context, "question": query})
-        processing_time = time.time() - start_time
-        
-        return {
-            "response": response,
-            "processing_time": processing_time
-        }
-    except Exception as e:
-        logger.error(f"Error testing prompt: {str(e)}")
-        return {
-            "response": f"Error: {str(e)}",
-            "processing_time": 0
-        }
 
 def prompt_evaluator_ui():
     """UI for prompt testing and evaluation tab with tabs, prompt selection, test, and evaluation."""

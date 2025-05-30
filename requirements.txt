@@ -54,7 +54,7 @@ pyjwt>=2.8.0
 cryptography>=41.0.5
 
 # Food image analysis
-google-generativeai>=0.8.0
+google-generativeai
 # Using Pillow version compatible with Streamlit and addressing CVEs
 Pillow>=10.2.0
 
