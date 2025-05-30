@@ -2,8 +2,8 @@ import logging
 import random
 import time
 from typing import List, Union, Any
-import google.generativeai as genai
-from google.generativeai.types import EmbedContentConfig
+from google import genai
+from google.genai.types import EmbedContentConfig
 from langchain.embeddings.base import Embeddings
 from config import GEMINI_API_KEY, EMBEDDING_DIMENSION
 
