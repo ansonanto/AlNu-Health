@@ -48,6 +48,12 @@ tenacity>=8.2.3
 pydeck>=0.8.1b0
 watchdog>=3.0.0
 
+# Firebase authentication
+pyrebase4>=4.7.1
+gcloud>=0.18.3
+pyjwt>=2.8.0
+cryptography>=41.0.5
+
 # Food image analysis
 google-generativeai>=0.8.0
 # Using Pillow version compatible with Streamlit and addressing CVEs

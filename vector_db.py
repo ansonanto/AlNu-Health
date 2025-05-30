@@ -6,8 +6,9 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from typing import List, Dict, Any, Optional, Union
 from langchain.docstore.document import Document
 
-from embeddings import CustomOpenAIEmbeddings
-from config import OPENAI_API_KEY, VECTOR_STORE_PATH
+# Import the direct Gemini embeddings implementation
+from gemini_embeddings import GeminiEmbeddings
+from config import GEMINI_API_KEY, VECTOR_STORE_PATH, EMBEDDING_DIMENSION
 from faiss_store import FAISSVectorStore
 
 # Set up logging
@@ -17,14 +18,18 @@ logger = logging.getLogger(__name__)
 def delete_vector_store():
     """Delete the vector store files"""
     try:
-        index_path = os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")
-        metadata_path = os.path.join(VECTOR_STORE_PATH, "metadata.pkl")
+        # Use consistent file names
+        index_path = os.path.join(VECTOR_STORE_PATH, "index.faiss")
+        metadata_path = os.path.join(VECTOR_STORE_PATH, "index.pkl")
+        dimension_path = os.path.join(VECTOR_STORE_PATH, "dimension.txt")
         
         # Delete files if they exist
         if os.path.exists(index_path):
             os.remove(index_path)
         if os.path.exists(metadata_path):
             os.remove(metadata_path)
+        if os.path.exists(dimension_path):
+            os.remove(dimension_path)
             
         logger.info("Vector store files deleted successfully")
         return True
@@ -44,15 +49,22 @@ def initialize_vector_db(reset_db=False) -> Optional[FAISSVectorStore]:
         return st.session_state.vector_store
     
     try:
-        # Initialize embedding function
-        embedding_function = CustomOpenAIEmbeddings()
+        # Initialize embedding function with the correct dimension
+        # Use the direct Gemini embeddings implementation
+        embedding_function = GeminiEmbeddings(
+            api_key=GEMINI_API_KEY,
+            output_dim=EMBEDDING_DIMENSION
+        )
         
         # Create vector store
         vector_store = FAISSVectorStore(embedding_function, VECTOR_STORE_PATH)
         
         # Store in session state
         st.session_state.vector_store = vector_store
-        st.session_state.db_status = "Vector store initialized successfully"
+        st.session_state.db_status = "Vector store loaded successfully"
+        
+        # Set the processed_docs flag to True so the UI will display the documents
+        st.session_state.processed_docs = True
         
         return vector_store
     except Exception as e:
@@ -95,11 +107,12 @@ def create_vector_db(documents: List[Dict[str, Any]], update_existing: bool = Fa
         logger.error(f"Error creating vector database: {str(e)}")
         st.session_state.db_status = f"Error: {str(e)}"
         return False
+
 def check_db_status() -> bool:
     """Check vector store status"""
     try:
-        # Check if vector store exists
-        if not os.path.exists(os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")):
+        # Check if vector store exists - use consistent file name
+        if not os.path.exists(os.path.join(VECTOR_STORE_PATH, "index.faiss")):
             logger.info("No existing vector store found")
             return False
 

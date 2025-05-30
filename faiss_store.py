@@ -12,6 +12,7 @@ from langchain.schema.retriever import BaseRetriever
 from langchain.schema.embeddings import Embeddings
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -21,9 +22,18 @@ class FAISSVectorStore:
     def __init__(self, embedding_function: Embeddings, index_folder: str = "simple_vector_storage"):
         self.embedding_function = embedding_function
         self.index_folder = index_folder
-        self.index_path = os.path.join(index_folder, "faiss_index.bin")
-        self.metadata_path = os.path.join(index_folder, "metadata.pkl")
-        self.dimension = 1536  # OpenAI embedding dimension
+        
+        # Use consistent file names for FAISS index files
+        self.index_path = os.path.join(index_folder, "index.faiss")
+        self.metadata_path = os.path.join(index_folder, "index.pkl")
+        
+        # Import the correct dimension from config
+        from config import EMBEDDING_DIMENSION
+        self.dimension = EMBEDDING_DIMENSION
+        logger.info(f"Using embedding dimension from config: {self.dimension}")
+        
+        # Store dimension in a separate file for persistence
+        self.dimension_path = os.path.join(index_folder, "dimension.txt")
         
         # Create storage directory if it doesn't exist
         os.makedirs(index_folder, exist_ok=True)
@@ -32,20 +42,71 @@ class FAISSVectorStore:
         self.index = self._load_or_create_index()
         self.metadata = self._load_metadata()
 
+    def _save_dimension(self):
+        """Save the dimension information to a file for persistence"""
+        try:
+            with open(self.dimension_path, 'w') as f:
+                f.write(str(self.dimension))
+            logger.info(f"Saved dimension information: {self.dimension}")
+        except Exception as e:
+            logger.error(f"Error saving dimension information: {str(e)}")
+    
+    def _load_dimension(self) -> int:
+        """Load the dimension information from file if it exists"""
+        if os.path.exists(self.dimension_path):
+            try:
+                with open(self.dimension_path, 'r') as f:
+                    dimension = int(f.read().strip())
+                logger.info(f"Loaded dimension from file: {dimension}")
+                return dimension
+            except Exception as e:
+                logger.error(f"Error loading dimension from file: {str(e)}")
+        return self.dimension  # Return default if file doesn't exist or error occurs
+    
     def _load_or_create_index(self) -> faiss.Index:
         """Load existing index or create a new one"""
+        # First try to load the dimension from file for persistence
+        saved_dimension = self._load_dimension()
+        if saved_dimension != self.dimension:
+            logger.info(f"Using saved dimension {saved_dimension} instead of config dimension {self.dimension}")
+            self.dimension = saved_dimension
+        
+        # Try to load existing index
         if os.path.exists(self.index_path):
-            logger.info("Loading existing FAISS index")
-            return faiss.read_index(self.index_path)
-        logger.info("Creating new FAISS index")
-        return faiss.IndexFlatL2(self.dimension)
+            try:
+                logger.info(f"Loading existing FAISS index from {self.index_path}")
+                index = faiss.read_index(self.index_path)
+                
+                # Check if the index dimension matches our expected dimension
+                index_dimension = index.d
+                if index_dimension != self.dimension:
+                    logger.warning(f"Dimension mismatch: index has {index_dimension}, saved has {self.dimension}")
+                    # We'll handle this by using the index's dimension instead of the saved dimension
+                    self.dimension = index_dimension
+                    logger.info(f"Adapting to existing index dimension: {self.dimension}")
+                    # Save the updated dimension for future consistency
+                    self._save_dimension()
+                
+                return index
+            except Exception as e:
+                logger.error(f"Error loading existing index: {str(e)}")
+        
+        # Create a new index if we couldn't load an existing one
+        logger.info(f"Creating new FAISS index with dimension {self.dimension}")
+        index = faiss.IndexFlatL2(self.dimension)
+        self._save_dimension()
+        return index
 
     def _load_metadata(self) -> List[Dict[str, Any]]:
         """Load existing metadata or initialize empty list"""
         if os.path.exists(self.metadata_path):
-            logger.info("Loading existing metadata")
-            with open(self.metadata_path, 'rb') as f:
-                return pickle.load(f)
+            logger.info(f"Loading existing metadata from {self.metadata_path}")
+            try:
+                with open(self.metadata_path, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.error(f"Error loading metadata: {str(e)}")
+        
         return []
 
     def _save_index(self):
@@ -53,7 +114,9 @@ class FAISSVectorStore:
         faiss.write_index(self.index, self.index_path)
         with open(self.metadata_path, 'wb') as f:
             pickle.dump(self.metadata, f)
-        logger.info("Saved FAISS index and metadata")
+        # Also save the dimension information for persistence
+        self._save_dimension()
+        logger.info(f"Saved FAISS index and metadata with dimension {self.dimension}")
 
     def add_documents(self, documents: List[Document], update_existing: bool = False):
         """Add documents to the vector store"""
@@ -83,34 +146,54 @@ class FAISSVectorStore:
             progress_bar.progress(progress)
             status_text.write(f"Processing document {i + 1}/{len(documents)}")
             
-            # Split text into chunks
-            chunks = text_splitter.split_text(doc.page_content)
-            
-            # Get or create metadata
-            doc_metadata = doc.metadata if hasattr(doc, 'metadata') else {}
-            
-            # Ensure source and title are present
-            if 'source' not in doc_metadata:
-                doc_metadata['source'] = f'Document_{i+1}'
-            if 'title' not in doc_metadata:
-                doc_metadata['title'] = os.path.basename(doc_metadata['source'])
+            # Skip empty documents
+            if not doc.page_content or not doc.page_content.strip():
+                logger.warning(f"Skipping empty document: {doc.metadata.get('source', 'Unknown')}")
+                continue
                 
-            # Create chunk-specific metadata
-            for j, chunk in enumerate(chunks):
-                chunk_metadata = {
-                    'content': chunk,
-                    'metadata': {
-                        **doc_metadata,
-                        'chunk': j + 1,
-                        'total_chunks': len(chunks)
+            try:
+                # Split text into chunks
+                chunks = text_splitter.split_text(doc.page_content)
+                
+                # Get or create metadata
+                doc_metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+                
+                # Ensure source and title are present
+                if 'source' not in doc_metadata:
+                    doc_metadata['source'] = f'Document_{i+1}'
+                if 'title' not in doc_metadata:
+                    doc_metadata['title'] = os.path.basename(doc_metadata['source'])
+                    
+                # Create chunk-specific metadata
+                for j, chunk in enumerate(chunks):
+                    # Skip empty chunks
+                    if not chunk or not chunk.strip():
+                        continue
+                        
+                    chunk_metadata = {
+                        'content': chunk,
+                        'metadata': {
+                            **doc_metadata,
+                            'chunk': j + 1,
+                            'total_chunks': len(chunks)
+                        }
                     }
-                }
-                all_metadatas.append(chunk_metadata)
-                all_chunks.append(chunk)
+                    all_metadatas.append(chunk_metadata)
+                    all_chunks.append(chunk)
+            except Exception as e:
+                logger.error(f"Error processing document {i+1}: {str(e)}")
+                # Continue with next document
+                continue
 
         # Process chunks in batches for embeddings
         try:
-            batch_size = 20  # Process 20 chunks at a time
+            if not all_chunks:
+                logger.warning("No valid chunks to process")
+                progress_bar.progress(1.0)
+                status_text.write("⚠️ No valid content to process")
+                return
+                
+            batch_size = 5  # Reduced from 20 to 5 to avoid timeouts
             all_embeddings = []
             total_batches = (len(all_chunks) + batch_size - 1) // batch_size
             
@@ -124,32 +207,63 @@ class FAISSVectorStore:
                 progress_bar.progress(progress)
                 status_text.write(f"Generating embeddings: Batch {current_batch}/{total_batches}")
                 
-                # Get embeddings for the batch
-                batch_embeddings = self.embedding_function.embed_documents(batch_chunks)
-                all_embeddings.extend(batch_embeddings)
-            
-            # Convert to numpy array and add to FAISS index
-            embeddings_np = np.array(all_embeddings).astype('float32')
-            self.index.add(embeddings_np)
-            
-            # Store metadata
-            self.metadata.extend(all_metadatas)
-            
-            # Save to disk
-            self._save_index()
-            
-            # Complete progress
-            progress_bar.progress(1.0)
-            status_text.write("✅ Processing complete!")
-            
-            logger.info(f"Added {len(all_chunks)} chunks from {len(documents)} documents to vector store")
+                try:
+                    # Get embeddings for the batch
+                    batch_embeddings = self.embedding_function.embed_documents(batch_chunks)
                     
-            # Save to disk after all batches are processed
-            self._save_index()
-            logger.info(f"Added {len(documents)} documents to vector store")
+                    # Verify all embeddings have the same dimension
+                    if batch_embeddings and len(batch_embeddings) > 0:
+                        first_dim = len(batch_embeddings[0])
+                        if first_dim != self.dimension:
+                            logger.warning(f"Embedding dimension mismatch: got {first_dim}, expected {self.dimension}")
+                            # Update the dimension if it's different
+                            if i == 0:  # Only update on first batch
+                                logger.info(f"Updating FAISS index dimension from {self.dimension} to {first_dim}")
+                                self.dimension = first_dim
+                                self.index = faiss.IndexFlatL2(self.dimension)
+                    
+                    all_embeddings.extend(batch_embeddings)
+                    
+                    # Add a small delay between batches to avoid rate limits
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Error generating embeddings for batch {current_batch}: {str(e)}")
+                    # Skip this batch and continue with the next one
+                    continue
+            
+            # Check if we have any valid embeddings
+            if not all_embeddings:
+                logger.error("No valid embeddings generated")
+                progress_bar.progress(1.0)
+                status_text.write("❌ Failed to generate embeddings")
+                return
+                
+            # Convert to numpy array and add to FAISS index
+            try:
+                embeddings_np = np.array(all_embeddings).astype('float32')
+                self.index.add(embeddings_np)
+                
+                # Store metadata
+                self.metadata.extend(all_metadatas[:len(all_embeddings)])  # Only store metadata for successful embeddings
+                
+                # Save to disk
+                self._save_index()
+                
+                # Complete progress
+                progress_bar.progress(1.0)
+                status_text.write("✅ Processing complete!")
+                
+                logger.info(f"Added {len(all_embeddings)} chunks from {len(documents)} documents to vector store")
+            except Exception as e:
+                logger.error(f"Error adding embeddings to FAISS index: {str(e)}")
+                progress_bar.progress(1.0)
+                status_text.write("❌ Error adding embeddings to index")
+                raise
             
         except Exception as e:
             logger.error(f"Error adding documents: {str(e)}")
+            progress_bar.progress(1.0)
+            status_text.write(f"❌ Error: {str(e)}")
             raise
 
     def get(self) -> Dict[str, Any]:
@@ -257,8 +371,9 @@ class ContentQualityFilter:
     """Filter document chunks based on content quality."""
     
     def __init__(self):
-        from config import OPENAI_API_KEY
-        self.llm = ChatOpenAI(temperature=0, model_name="gpt-4o", openai_api_key=OPENAI_API_KEY)
+        from config import GEMINI_CONFIG
+        from gemini_llm import GeminiLLM
+        self.llm = GeminiLLM(temperature=0)
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", "You are a content quality analyzer. Your task is to determine if a given text chunk contains meaningful content or is just references/citations. A chunk is considered a reference section if it primarily consists of bibliographic citations (e.g., author names, journal names, DOIs, publication years, [CrossRef], [PubMed] tags) or if it's a list of numbered references. A chunk is considered content if it contains actual explanatory text about the topic."),
             ("user", "Analyze this text chunk and respond with ONLY 'reference' or 'content'. Respond with 'reference' if the chunk is primarily citations or bibliography.\n\n{chunk}")

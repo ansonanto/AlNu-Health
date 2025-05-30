@@ -1020,19 +1020,15 @@ def pubmed_downloader_ui():
         
         # Get list of documents already in the vector database
         vectordb_docs = set()
-        if 'chroma_instance' in st.session_state and st.session_state.chroma_instance is not None:
+        # Using FAISS vector store instead of ChromaDB for better Streamlit compatibility
+        if 'vector_store' in st.session_state and st.session_state.vector_store is not None:
             try:
-                # Get all document IDs from the vector database
-                collection = st.session_state.chroma_instance._collection
-                if collection:
-                    # Get all metadatas
-                    result = collection.get(include=["metadatas"])
-                    if result and "metadatas" in result and result["metadatas"]:
-                        metadatas = result["metadatas"]
-                        # Extract unique document IDs
-                        for metadata in metadatas:
-                            if metadata and 'document_id' in metadata:
-                                vectordb_docs.add(metadata['document_id'])
+                # Get all metadatas from FAISS vector store
+                if hasattr(st.session_state.vector_store, '_metadata') and st.session_state.vector_store._metadata:
+                    # Extract unique document IDs from FAISS metadata
+                    for metadata in st.session_state.vector_store._metadata:
+                        if metadata and 'document_id' in metadata:
+                            vectordb_docs.add(metadata['document_id'])
             except Exception as e:
                 st.error(f"Error getting documents from vector database: {e}")
         

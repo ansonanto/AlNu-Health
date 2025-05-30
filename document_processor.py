@@ -59,20 +59,36 @@ class PaperManager:
             if not self.vectorstore:
                 if 'db' in st.session_state:
                     self.vectorstore = st.session_state.db
+                elif 'vector_store' in st.session_state:
+                    self.vectorstore = st.session_state.vector_store
                 else:
                     return 0, []
             
-            # Get all documents
-            all_docs = self.vectorstore.get()
-            
-            # Extract unique document sources
-            unique_sources = set()
-            if all_docs and 'metadatas' in all_docs:
-                for metadata in all_docs['metadatas']:
+            # Check if we're using the FAISS vector store
+            if hasattr(self.vectorstore, '_metadata'):
+                # Extract unique document sources from FAISS metadata
+                unique_sources = set()
+                for metadata in self.vectorstore._metadata:
                     if metadata and isinstance(metadata, dict) and 'source' in metadata:
                         unique_sources.add(metadata['source'])
+                return len(unique_sources), list(unique_sources)
             
-            return len(unique_sources), list(unique_sources)
+            # If we're using a different vector store with a get() method
+            elif hasattr(self.vectorstore, 'get'):
+                # Get all documents
+                all_docs = self.vectorstore.get()
+                
+                # Extract unique document sources
+                unique_sources = set()
+                if all_docs and 'metadatas' in all_docs:
+                    for metadata in all_docs['metadatas']:
+                        if metadata and isinstance(metadata, dict) and 'source' in metadata:
+                            unique_sources.add(metadata['source'])
+                
+                return len(unique_sources), list(unique_sources)
+            
+            # If we can't get the documents, return empty
+            return 0, []
         except Exception as e:
             logger.error(f"Error getting paper info: {str(e)}")
             return 0, []

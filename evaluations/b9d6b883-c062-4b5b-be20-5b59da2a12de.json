@@ -1,0 +1,11 @@
+{
+  "id": "b9d6b883-c062-4b5b-be20-5b59da2a12de",
+  "prompt_id": null,
+  "prompt_name": "Default",
+  "query": "What is glp-1?",
+  "context": "",
+  "response": "GLP-1, or glucagon-like peptide-1, is a naturally occurring hormone in the body that regulates blood sugar, appetite, and digestion [web3]. It is a peptide hormone derived from tissue-specific posttranslational processing of the proglucagon peptide [web2].\n\nGLP-1 receptor agonists (GLP-1RAs) are a class of medications that mimic the effects of this natural hormone [web3]. GLP-1RAs have demonstrated several potential therapeutic effects, including limiting the development of atherosclerotic plaques through anti-inflammatory mechanisms and preventing vascular remodeling [doc1]. They also exhibit anti-adhesive and anti-thrombotic properties in the endothelium, potentially delaying atherosclerosis [doc1].\n\nGLP-1RAs are primarily used to manage blood sugar levels in people with Type 2 diabetes and can also help treat obesity [web1, web4]. Common side effects include nausea, vomiting, diarrhea, constipation, and abdominal pain [web3].\n\n**Please note:** GLP-1 drugs are prescription medications and should only be taken under the supervision of a healthcare professional [web3].\n",
+  "score": 8,
+  "feedback": "test",
+  "created_at": "2025-05-30T05:33:45.433035"
+}

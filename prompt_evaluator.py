@@ -5,12 +5,16 @@ import uuid
 import logging
 import streamlit as st
 from datetime import datetime
-from langchain_community.chat_models import ChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 from typing import List, Dict, Any, Optional
+from gemini_services import gemini_service
+from qa_service import QAService, qa_service
+from firebase_helpers import save_evaluation_firestore, fetch_evaluations_from_firestore
 
-from config import OPENAI_API_KEY, MODEL_NAME, PROMPTS_DIR, EVALUATIONS_DIR
+from config import GEMINI_API_KEY, MODEL_NAME, PROMPTS_DIR, EVALUATIONS_DIR, GEMINI_CONFIG
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -19,29 +23,9 @@ logger = logging.getLogger(__name__)
 # Constants
 PROMPTS_DIRECTORY = PROMPTS_DIR
 EVALUATIONS_DIRECTORY = EVALUATIONS_DIR
-DEFAULT_SYSTEM_PROMPT = """
-You are an AI assistant specialized in medical and scientific research. 
-Answer the user's question based on the provided context from research papers.
 
-Context from relevant documents:
-{context}
-
-User Question: {question}
-
-Instructions:
-1. Answer the question based ONLY on the provided context.
-2. IMPORTANT: This is a continuous conversation. Always consider the full conversation history when interpreting the user's question.
-3. If the user's question seems vague or could be interpreted in multiple ways, assume it's related to the previous topic of conversation.
-4. For example, if they previously discussed diabetes and then ask for a "roadmap", interpret this as asking for a roadmap for diabetes management.
-5. If the user refers to something mentioned in a previous exchange, make sure to address it directly.
-6. If the context doesn't contain enough information to answer the question, say so clearly.
-7. Cite the specific documents you're using in your answer.
-8. Be concise and accurate.
-9. If the question is about medical advice, remind the user that you're providing information from research papers, not personalized medical advice.
-10. Always conclude your response with: "Please note that this information is based on research papers and is not personalized medical advice. For personalized guidance, consult a healthcare professional."
-
-Answer:
-"""
+# Use the combined template as the default prompt
+DEFAULT_SYSTEM_PROMPT = QAService().COMBINED_TEMPLATE
 
 def ensure_directories():
     """Ensure necessary directories exist"""
@@ -203,19 +187,32 @@ def test_prompt(prompt_text, query, context):
             input_variables=["context", "question"]
         )
         
-        # Initialize the LLM
-        llm = ChatOpenAI(
-            model_name=MODEL_NAME,
-            temperature=0.2,
-            openai_api_key=OPENAI_API_KEY
+        # Initialize the Gemini LLM
+        # Ensure we're explicitly using the Gemini API key
+        if not GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not set. Please set it in your environment variables or secrets.")
+            
+        llm = ChatGoogleGenerativeAI(
+            model=MODEL_NAME,
+            temperature=GEMINI_CONFIG.get("temperature", 0.0),
+            top_p=GEMINI_CONFIG.get("top_p", 0.95),
+            # top_k must be positive, so we'll use 40 as a default value
+            top_k=40,  # Default value that works well
+            max_output_tokens=GEMINI_CONFIG.get("max_output_tokens", 2048),
+            google_api_key=GEMINI_API_KEY
         )
         
-        # Create chain
-        chain = LLMChain(llm=llm, prompt=prompt_template)
+        # Create chain using the new RunnableSequence pattern
+        chain = (
+            {"context": RunnablePassthrough(), "question": RunnablePassthrough()}
+            | prompt_template
+            | llm
+            | StrOutputParser()
+        )
         
         # Execute chain
         start_time = time.time()
-        response = chain.run(context=context, question=query)
+        response = chain.invoke({"context": context, "question": query})
         processing_time = time.time() - start_time
         
         return {
@@ -230,167 +227,146 @@ def test_prompt(prompt_text, query, context):
         }
 
 def prompt_evaluator_ui():
-    """Streamlit interface for prompt testing and evaluation"""
-    st.title("Prompt Testing & Evaluation")
-    
+    """UI for prompt testing and evaluation tab with tabs, prompt selection, test, and evaluation."""
+    st.header("Prompt Testing & Evaluation")
     tabs = st.tabs(["Test Prompts", "View Evaluations"])
-    
-    with tabs[0]:  # Test Prompts
-        st.header("Test Different Prompts")
-        
-        # Load saved prompts
-        prompts = load_prompts()
-        prompt_options = ["Default"] + [p["name"] for p in prompts]
-        
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            selected_prompt = st.selectbox("Select a prompt template", prompt_options)
-        
-        with col2:
-            use_custom = st.checkbox("Use custom prompt")
-        
-        # Get the prompt text
+
+    # --- Test Prompts Tab ---
+    with tabs[0]:
+        st.subheader("Test Different Prompts")
+        prompt_templates = load_prompts()
+        template_names = ["Default"] + [p["name"] for p in prompt_templates]
+        selected_template = st.selectbox("Select a prompt template", template_names)
+        use_custom = st.checkbox("Use custom prompt")
+
         if use_custom:
-            prompt_text = st.text_area("Custom Prompt Template", DEFAULT_SYSTEM_PROMPT, height=300)
-            prompt_name = "Custom"
-            prompt_id = None
+            custom_template = st.text_area("Custom Prompt Template", value=DEFAULT_SYSTEM_PROMPT, height=200)
+            template_text = custom_template
         else:
-            if selected_prompt == "Default":
-                prompt_text = DEFAULT_SYSTEM_PROMPT
-                prompt_name = "Default"
-                prompt_id = None
+            if selected_template == "Default":
+                template_text = DEFAULT_SYSTEM_PROMPT
             else:
-                selected_idx = prompt_options.index(selected_prompt) - 1  # Adjust for "Default"
-                prompt_text = prompts[selected_idx]["text"]
-                prompt_name = prompts[selected_idx]["name"]
-                prompt_id = prompts[selected_idx]["id"]
-            
-            st.text_area("Prompt Template (Read Only)", prompt_text, height=200, disabled=True)
-        
-        # Query and context inputs
+                template_text = next((p["text"] for p in prompt_templates if p["name"] == selected_template), DEFAULT_SYSTEM_PROMPT)
+            st.text_area("Prompt Template (Read Only)", template_text, height=200, disabled=True)
+
         st.subheader("Test Input")
-        query = st.text_input("Query", "What are the latest treatments for type 2 diabetes?")
-        context = st.text_area("Context (simulated retrieval results)", 
-                              "Document: diabetes_treatment.pdf, Chunk: 3\n"
-                              "Recent studies have shown that GLP-1 receptor agonists like semaglutide and tirzepatide "
-                              "are highly effective for treating type 2 diabetes. They work by stimulating insulin "
-                              "secretion, suppressing glucagon, and slowing gastric emptying. These medications have "
-                              "shown significant benefits for weight loss and cardiovascular outcomes.\n\n"
-                              "Document: diabetes_review.pdf, Chunk: 7\n"
-                              "SGLT-2 inhibitors represent another important class of medications for type 2 diabetes. "
-                              "They work by preventing glucose reabsorption in the kidneys, leading to increased "
-                              "glucose excretion in urine. Clinical trials have demonstrated cardiovascular and renal "
-                              "protective effects independent of their glucose-lowering action.",
-                              height=200)
-        
-        # Use session state to store test results
-        if 'test_result' not in st.session_state:
-            st.session_state.test_result = None
-        
-        # Test button
+        query = st.text_input("Query")
+
         if st.button("Test Prompt"):
-            with st.spinner("Testing prompt..."):
-                result = test_prompt(prompt_text, query, context)
-                st.session_state.test_result = result
-                st.session_state.current_prompt_text = prompt_text
-                st.session_state.current_prompt_name = prompt_name
-                st.session_state.current_prompt_id = prompt_id
-                st.session_state.current_query = query
-                st.session_state.current_context = context
-        
-        # Display results if available
-        if st.session_state.test_result:
-            st.subheader("Response")
-            st.write(st.session_state.test_result["response"])
-            st.info(f"Processing time: {st.session_state.test_result['processing_time']:.2f} seconds")
+            if query:
+                with st.spinner("Testing prompt..."):
+                    try:
+                        # Use asyncio to run the async process_query
+                        import asyncio
+                        result = asyncio.run(qa_service.process_query(
+                            query=query,
+                            prompt_template=template_text
+                        ))
+                        st.session_state.prompt_test_result = result
+                        st.session_state.show_evaluation = True
+                        
+                    except Exception as e:
+                        st.error(f"Error testing prompt: {str(e)}")
+                        logger.error(f"Error in prompt test: {str(e)}")
+            else:
+                st.warning("Please enter a query to test the prompt.")
+
+        # Show test result and evaluation form
+        if "prompt_test_result" in st.session_state and st.session_state.get("show_evaluation", False):
+            result = st.session_state.prompt_test_result
             
-            # Evaluation section
-            st.subheader("Evaluate Response")
-            score = st.slider("Score (1-10)", 1, 10, 7, key="eval_score")
-            feedback = st.text_area("Feedback (optional)", "", key="eval_feedback")
+            # Display the response
+            st.markdown(f"**Response:**\n{result['answer']}")
             
-            # For custom prompts
-            if use_custom or st.session_state.current_prompt_id is None:
-                custom_name = st.text_input("Name for this prompt template", "My Custom Prompt")
+            # Display sources if available
+            if result.get('sources'):
+                st.markdown("**Sources:**")
+                for source in result['sources']:
+                    st.markdown(f"- {source.get('title', source.get('source', 'Unknown'))}")
             
-            # Save evaluation button (outside of any conditional)
-            if st.button("Save Evaluation"):
-                # If using custom prompt, save it first
-                if use_custom or st.session_state.current_prompt_id is None:
-                    prompt_id = save_prompt(custom_name, st.session_state.current_prompt_text)
-                    prompt_name = custom_name
-                else:
-                    prompt_id = st.session_state.current_prompt_id
-                    prompt_name = st.session_state.current_prompt_name
-                
-                # Save evaluation
-                eval_id = save_evaluation(
-                    prompt_id, 
-                    prompt_name, 
-                    st.session_state.current_query, 
-                    st.session_state.current_context, 
-                    st.session_state.test_result["response"], 
-                    score, 
-                    feedback
+            st.caption(f"Processing time: {result.get('processing_time', 0):.2f} seconds")
+            
+            # Add rating and feedback section
+            st.subheader("Rate the Response")
+            rating = st.slider("How would you rate this response?", 1, 10, 5)
+            feedback = st.text_area("Additional feedback (optional)", height=100)
+            
+            if st.button("Submit Evaluation"):
+                # Save the evaluation to Firestore using logged-in user info
+                user_id = st.session_state.get("user_id")
+                evaluator_name = st.session_state.get("evaluator_name")
+                id_token = st.session_state.get("id_token")
+                prompt = template_text
+                query_val = query
+                response_val = result['answer']
+                sources_val = result.get('sources', [])
+                rating_val = rating
+                feedback_val = feedback
+                success = save_evaluation_firestore(
+                    id_token,
+                    user_id,
+                    evaluator_name,
+                    prompt,
+                    query_val,
+                    response_val,
+                    sources_val,
+                    rating_val,
+                    feedback_val
                 )
-                
-                st.success(f"Evaluation saved with ID: {eval_id}")
-    
-    with tabs[1]:  # View Evaluations
-        st.header("View Evaluations")
-        
-        # Filter options
-        prompt_names = [p["name"] for p in prompts]
-        filter_prompt = st.selectbox(
-            "Filter by prompt", 
-            ["All Prompts"] + prompt_names
-        )
-        
-        # Load evaluations with filter
-        if filter_prompt == "All Prompts":
-            evaluations = load_evaluations()
+                if success:
+                    st.success("Evaluation saved to Firestore!")
+                else:
+                    st.error("Failed to save evaluation to Firestore.")
+                st.session_state.show_evaluation = False
+
+        with st.expander("Instructions"):
+            st.markdown("""
+            ### How to Use
+            1. Select a prompt template or use the default
+            2. Optionally enable and edit a custom prompt
+            3. Enter your query, then click "Test Prompt"
+            4. Rate the response and provide feedback
+            ### Tips
+            - Be specific in your questions
+            - Consider medical disclaimers
+            - Cite your sources
+            """)
+            st.subheader("Example")
+            st.markdown("""
+            **Question:**
+            What are the benefits of exercise for heart health?
+            """)
+
+    # --- View Evaluations Tab ---
+    with tabs[1]:
+        st.subheader("View Evaluations")
+        id_token = st.session_state.get("id_token")
+        user_id = st.session_state.get("user_id")
+        if not id_token:
+            st.info("Please log in to view evaluations.")
         else:
-            selected_idx = prompt_names.index(filter_prompt)
-            prompt_id = prompts[selected_idx]["id"]
-            evaluations = load_evaluations(prompt_id)
-        
-        if not evaluations:
-            st.info("No evaluations found with the current filter.")
-        else:
-            st.info(f"Found {len(evaluations)} evaluations")
-            
-            # Display evaluations
-            for eval_data in evaluations:
-                with st.expander(f"{eval_data['prompt_name']} - Score: {eval_data['score']}/10 ({eval_data['created_at'][:10]})"):
-                    # Create columns for layout - main content and delete button
-                    col1, col2 = st.columns([5, 1])
-                    
-                    with col1:
-                        st.subheader("Query")
-                        st.write(eval_data["query"])
-                        
-                        st.subheader("Context")
-                        st.text(eval_data["context"])
-                        
-                        st.subheader("Response")
-                        st.write(eval_data["response"])
-                        
-                        if eval_data["feedback"]:
-                            st.subheader("Feedback")
-                            st.write(eval_data["feedback"])
-                    
-                    with col2:
-                        # Add delete button
-                        eval_id = eval_data["id"]
-                        delete_key = f"delete_{eval_id}"
-                        
-                        if st.button("🗑️ Delete", key=delete_key):
-                            if delete_evaluation(eval_id):
-                                st.success("Evaluation deleted successfully!")
-                                st.rerun()  # Refresh the page to update the list
-                            else:
-                                st.error("Failed to delete evaluation.")
+            # Fetch from Firestore (show all evaluations)
+            evaluations = fetch_evaluations_from_firestore(id_token)
+            if not evaluations:
+                st.info("No evaluations found.")
+            else:
+                # Get unique evaluator names
+                names = sorted(set(e.get("evaluator_name", "Unknown") for e in evaluations))
+                selected_name = st.selectbox("Filter by evaluator name", ["All"] + names)
+                if selected_name != "All":
+                    filtered_evals = [e for e in evaluations if e.get("evaluator_name", "Unknown") == selected_name]
+                else:
+                    filtered_evals = evaluations
+                for eval_data in filtered_evals:
+                    with st.expander(f"{eval_data.get('evaluator_name', 'Unknown')} | {eval_data.get('query', '')[:40]}..."):
+                        st.markdown(f"**Evaluator:** {eval_data.get('evaluator_name', '')}")
+                        st.markdown(f"**Prompt:** {eval_data.get('prompt', '')}")
+                        st.markdown(f"**Query:** {eval_data.get('query', '')}")
+                        st.markdown(f"**Response:** {eval_data.get('response', '')}")
+                        st.markdown(f"**Sources:** {eval_data.get('sources', '')}")
+                        st.markdown(f"**Rating:** {eval_data.get('rating', '')}/10")
+                        st.markdown(f"**Feedback:** {eval_data.get('feedback', '')}")
+                        st.markdown(f"**Timestamp:** {eval_data.get('timestamp', '')}")
 
 if __name__ == "__main__":
     prompt_evaluator_ui()

@@ -1,5 +1,9 @@
 # Must be the first import
 import streamlit as st
+import requests
+from datetime import datetime
+import re
+import json
 
 # Set page config - must be the first Streamlit command
 st.set_page_config(
@@ -15,15 +19,16 @@ import time
 import json
 import logging
 from pathlib import Path
-from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
+import asyncio
 
 # Third-party imports
 from PIL import Image
 import openai
+import google.generativeai as genai
 
 # Import configuration
-from config import OPENAI_API_KEY, GEMINI_API_KEY, VECTOR_STORE_PATH
+from config import VECTOR_STORE_PATH
 
 # Import utility functions
 from document_processor import process_documents, PaperManager
@@ -32,13 +37,110 @@ from query_processor import query_documents
 from pubmed_downloader import pubmed_downloader_ui
 from prompt_evaluator import prompt_evaluator_ui
 from food_analyzer import process_food_image, format_macro_display
+from gemini_services import gemini_service
+from qa_service import qa_service
+from firebase_helpers import save_evaluation_firestore
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure OpenAI API key
-openai.api_key = OPENAI_API_KEY
+# Configure API keys from secrets
+openai.api_key = st.secrets["api_keys"]["openai"]
+
+# Initialize Gemini
+try:
+    # Initialize Gemini model
+    model = genai.GenerativeModel(
+        model_name=st.secrets["settings"]["default_model"],
+        generation_config={
+            "temperature": 0.0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "max_output_tokens": 2048
+        }
+    )
+    # Set API key
+    model.api_key = st.secrets["api_keys"]["gemini"]
+    logger.info("Gemini model initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing Gemini model: {str(e)}")
+    st.error("Failed to initialize Gemini model. Please check your API key and try again.")
+    st.stop()
+
+# Get model settings from secrets
+DEFAULT_MODEL = st.secrets["settings"]["default_model"]
+EMBEDDING_MODEL = st.secrets["settings"]["embedding_model"]
+
+API_KEY = st.secrets["firebase"]["apiKey"]
+PROJECT_ID = st.secrets["firebase"]["projectId"]
+
+REGISTER_URL = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={API_KEY}"
+LOGIN_URL = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={API_KEY}"
+FIRESTORE_USERS_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/users"
+FIRESTORE_EVALS_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/evaluations"
+
+def register_user(name, email, password):
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    resp = requests.post(REGISTER_URL, json=payload)
+    data = resp.json()
+    if "error" in data:
+        return False, data["error"]["message"]
+    id_token = data["idToken"]
+    user_id = data["localId"]
+    headers = {"Authorization": f"Bearer {id_token}"}
+    doc = {
+        "fields": {
+            "name": {"stringValue": name},
+            "email": {"stringValue": email},
+            "created_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"},
+            "user_id": {"stringValue": user_id}
+        }
+    }
+    resp2 = requests.post(FIRESTORE_USERS_URL, headers=headers, json=doc)
+    if resp2.status_code == 200:
+        return True, "Registration successful!"
+    else:
+        return False, f"Registered, but failed to save user info: {resp2.text}"
+
+def login_user(email, password):
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    resp = requests.post(LOGIN_URL, json=payload)
+    data = resp.json()
+    if "error" in data:
+        return False, data["error"]["message"], None
+    id_token = data["idToken"]
+    user_id = data["localId"]
+    # Get user name from Firestore
+    headers = {"Authorization": f"Bearer {id_token}"}
+    r = requests.get(FIRESTORE_USERS_URL, headers=headers)
+    name = None
+    if r.status_code == 200:
+        docs = r.json().get("documents", [])
+        for doc in docs:
+            fields = doc.get("fields", {})
+            if fields.get("user_id", {}).get("stringValue") == user_id:
+                name = fields.get("name", {}).get("stringValue")
+                break
+    return True, "Login successful!", {"idToken": id_token, "localId": user_id, "name": name or ""}
+
+def save_evaluation_firestore(id_token, user_id, evaluator_name, prompt, query, response, sources, rating, feedback):
+    headers = {"Authorization": f"Bearer {id_token}"}
+    doc = {
+        "fields": {
+            "prompt": {"stringValue": prompt},
+            "query": {"stringValue": query},
+            "response": {"stringValue": response},
+            "sources": {"stringValue": str(sources)},
+            "rating": {"integerValue": str(rating)},
+            "feedback": {"stringValue": feedback},
+            "timestamp": {"timestampValue": datetime.utcnow().isoformat() + "Z"},
+            "user_id": {"stringValue": user_id},
+            "evaluator_name": {"stringValue": evaluator_name}
+        }
+    }
+    resp = requests.post(FIRESTORE_EVALS_URL, headers=headers, json=doc)
+    return resp.status_code == 200
 
 def initialize_session_state():
     """Initialize session state variables if they don't exist"""
@@ -66,6 +168,16 @@ def initialize_session_state():
         st.session_state.selected_document = None
     if 'current_tab' not in st.session_state:
         st.session_state.current_tab = "Document Management"
+    if 'chat_mode' not in st.session_state:
+        st.session_state.chat_mode = False
+    if 'evaluation_results' not in st.session_state:
+        st.session_state.evaluation_results = None
+    if 'firebase_auth' not in st.session_state:
+        st.session_state.firebase_auth = None
+    if 'user_info' not in st.session_state:
+        st.session_state.user_info = None
+    if 'current_conversation_id' not in st.session_state:
+        st.session_state.current_conversation_id = None
 
 # Initialize session state variables if they don't exist
 initialize_session_state()
@@ -73,22 +185,29 @@ initialize_session_state()
 # Try to initialize the vector database on startup
 try:
     # Check for existing vector store at startup
-    if os.path.exists(os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")):
+    vector_store_path = Path("./simple_vector_storage")
+    if vector_store_path.exists() and (vector_store_path / "index.faiss").exists():
         logger.info("Found existing vector database, attempting to load")
         # Initialize the database
         db = initialize_vector_db()
         if db is not None:
             st.session_state.db = db
+            st.session_state.vector_store = db  # Store in both places for compatibility
             st.session_state.processed_docs = True
             st.session_state.db_status = "Vector database loaded successfully"
+            logger.info("Vector database loaded successfully")
         else:
             st.session_state.processed_docs = False
             st.session_state.db_status = "Failed to load vector database"
+            logger.warning("Failed to load vector database")
     else:
         logger.info("No existing vector database found or verification failed")
+        st.session_state.processed_docs = False
+        st.session_state.db_status = "No vector database found"
 except Exception as e:
     logger.error(f"Error initializing vector database on startup: {str(e)}")
-    # Don't raise the exception, just log it
+    st.session_state.processed_docs = False
+    st.session_state.db_status = f"Error: {str(e)}"
 
 # Initialize additional session state variables for search results and UI state
 if 'search_results' not in st.session_state:
@@ -128,8 +247,52 @@ def load_query_history():
         logger.error(f"Error loading query history: {str(e)}")
         st.session_state.query_history = []
 
+def show_auth():
+    st.sidebar.title("User Authentication")
+    menu = st.sidebar.radio("Menu", ["Login", "Register"])
+    if menu == "Register":
+        st.sidebar.subheader("Register")
+        name = st.sidebar.text_input("Name", key="reg_name")
+        email = st.sidebar.text_input("Email", key="reg_email")
+        password = st.sidebar.text_input("Password", type="password", key="reg_password")
+        if st.sidebar.button("Register"):
+            if not name or not email or not password:
+                st.sidebar.error("Please fill all fields.")
+            else:
+                success, msg = register_user(name, email, password)
+                if success:
+                    st.sidebar.success(msg)
+                else:
+                    st.sidebar.error(msg)
+    elif menu == "Login":
+        st.sidebar.subheader("Login")
+        email = st.sidebar.text_input("Email", key="login_email")
+        password = st.sidebar.text_input("Password", type="password", key="login_password")
+        if st.sidebar.button("Login"):
+            if not email or not password:
+                st.sidebar.error("Please fill all fields.")
+            else:
+                success, msg, data = login_user(email, password)
+                if success:
+                    st.sidebar.success(msg)
+                    st.session_state["id_token"] = data["idToken"]
+                    st.session_state["user_id"] = data["localId"]
+                    st.session_state["evaluator_name"] = data["name"]
+                    st.session_state["email"] = email
+                    st.session_state["logged_in"] = True
+                else:
+                    st.sidebar.error(msg)
+    if st.session_state.get("logged_in"):
+        st.sidebar.success(f"Logged in as {st.session_state['evaluator_name']} ({st.session_state['email']})")
+        if st.sidebar.button("Logout"):
+            st.session_state.clear()
+            st.rerun()
+
 def main():
-    """Main application UI"""
+    show_auth()
+    if not st.session_state.get("logged_in"):
+        st.warning("Please log in to use the app.")
+        st.stop()
     # Initialize session state
     initialize_session_state()
     
@@ -158,6 +321,82 @@ def main():
     st.markdown("---")
     st.markdown("AlNu Health - Medical Research RAG System 2025")
 
+def load_organized_docs():
+    if os.path.exists("organized_docs.json"):
+        with open("organized_docs.json", "r") as f:
+            return json.load(f)
+    return []
+
+def get_all_pdfs_from_results():
+    results_dir = "results"
+    return [os.path.join(results_dir, fname) for fname in os.listdir(results_dir) if fname.lower().endswith(".pdf")]
+
+# Load organized docs on app start
+if "organized_docs" not in st.session_state:
+    st.session_state.organized_docs = load_organized_docs()
+
+def process_new_documents():
+    # Dummy vectorization step (replace with your actual vectorization logic)
+    for pdf_path in get_all_pdfs_from_results():
+        # Here you would extract text, create embeddings, and add to your vector DB
+        pass
+    st.success(f"Processed and vectorized {len(get_all_pdfs_from_results())} new documents.")
+
+def organize_documents_with_gemini():
+    api_key = st.secrets["api_keys"]["gemini"]
+    model_name = st.secrets["settings"]["default_model"]
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name=model_name)
+    # Only organize new PDFs
+    organized_docs = st.session_state.organized_docs.copy()
+    progress_bar = st.progress(0, text="Organizing documents...")
+    total = len(get_all_pdfs_from_results())
+    for idx, pdf_path in enumerate(get_all_pdfs_from_results()):
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(pdf_path)
+            text = " ".join(page.extract_text() or "" for page in reader.pages)
+        except Exception:
+            text = ""
+        prompt = f'''
+You are an expert document classifier. Given the following text, classify the document as one of: "research paper", "report", "guide", or "other". Also, suggest a short topic or main subject for the document.
+
+Document text:
+"""
+{text[:1000]}
+"""
+
+Respond in JSON like:
+{{"type": "...", "topic": "..."}}
+'''
+        try:
+            response = model.generate_content(prompt)
+            match = re.search(r'\{.*\}', response.text, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+                doc_type = result.get("type", "other")
+                topic = result.get("topic", "")
+            else:
+                doc_type = "other"
+                topic = ""
+        except Exception as e:
+            doc_type = "other"
+            topic = ""
+            st.warning(f"Failed to classify {os.path.basename(pdf_path)}: {e}")
+        organized_docs.append({
+            "title": os.path.basename(pdf_path),
+            "path": pdf_path,
+            "type": doc_type,
+            "topic": topic
+        })
+        progress_bar.progress((idx + 1) / total, text=f"Organizing {os.path.basename(pdf_path)} ({idx + 1}/{total})")
+    progress_bar.empty()
+    st.session_state.organized_docs = organized_docs
+    # Save to JSON
+    with open("organized_docs.json", "w") as f:
+        json.dump(organized_docs, f, indent=2)
+    st.success("Documents organized by type and topic!")
+
 def document_management_ui():
     """UI for document management tab"""
     st.header("Document Management")
@@ -176,23 +415,8 @@ def document_management_ui():
         st.info(f"Vector Database Status: {st.session_state.db_status}")
         
         # Process documents button
-        if st.button("Process Documents"):
-            # Process documents
-            documents, new_docs = process_documents()
-            
-            if documents:
-                st.session_state.documents = documents
-                st.session_state.new_documents = new_docs
-                
-                # Create vector database
-                db = create_vector_db(documents)
-                if db:
-                    st.session_state.db = db
-                    st.success(f"Successfully processed {len(documents)} documents")
-                else:
-                    st.error("Failed to create vector database")
-            else:
-                st.warning("No documents to process")
+        if get_all_pdfs_from_results() and st.button("Process Documents"):
+            process_new_documents()
         
         # Reset database button
         if st.button("Reset Database"):
@@ -200,38 +424,36 @@ def document_management_ui():
             if initialize_vector_db(reset_db=True):
                 # Clear all relevant session state except query history
                 st.session_state.db = None
-                st.session_state.processed_docs = False
                 st.session_state.vector_store = None
+                st.session_state.processed_docs = False
                 st.session_state.documents = []
                 st.session_state.new_documents = []
                 st.session_state.last_processed_time = None
                 st.session_state.db_status = "Not initialized"
                 
                 st.success("Vector database reset successfully")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Failed to reset vector database")
         
+        # Organize documents button
+        if st.button("Organize Documents"):
+            organize_documents_with_gemini()
+        
         # Display document info
-        if st.session_state.processed_docs:
-            st.subheader("Processed Documents")
-            
-            # Initialize PaperManager
-            paper_manager = PaperManager()
-            
-            # Get paper info
-            num_papers, paper_titles = paper_manager.get_paper_info()
-            
-            # Display paper info
-            st.info(f"Number of papers in database: {num_papers}")
-            
-            # Display paper titles
-            if paper_titles:
-                st.write("Paper titles:")
-                for title in paper_titles:
-                    st.write(f"- {title}")
-            else:
-                st.warning("No paper titles found")
+        docs_to_show = st.session_state.get("organized_docs", [])
+        types = sorted(set(doc.get("type", "other") for doc in docs_to_show))
+        selected_type = st.selectbox("Filter by type", ["All"] + types)
+        if selected_type != "All":
+            docs_to_show = [doc for doc in docs_to_show if doc.get("type") == selected_type]
+        if not docs_to_show:
+            st.info("No documents to display.")
+        else:
+            for doc in docs_to_show:
+                st.markdown(f"**Title:** {doc.get('title', '')}")
+                st.markdown(f"**Type:** {doc.get('type', '')}")
+                st.markdown(f"**Topic:** {doc.get('topic', '')}")
+                st.markdown("---")
     
     with col2:
         # Document upload section
@@ -254,218 +476,105 @@ def document_management_ui():
             st.info(f"Last processed: {last_processed}")
 
 def search_query_ui():
-    """UI for search and query tab"""
+    """Search and query interface"""
     st.header("Search & Query")
     
-    # Create tabs for text and image input
-    input_tabs = st.tabs(["Text Query", "Food Image"])
+    # Chat mode toggle
+    chat_mode = st.toggle("Chat Mode", value=st.session_state.get("chat_mode", False))
+    st.session_state["chat_mode"] = chat_mode
     
-    with input_tabs[0]:  # Text Query tab
-        st.subheader("Ask a Medical Research Question")
-        
-        # Create columns for layout
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            # First check if we need to initialize the database
-            if st.session_state.db is None:
-                # Try to initialize the database if it exists
-                if os.path.exists(os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")):
-                    logger.info("Attempting to initialize vector database for search")
-                    db = initialize_vector_db()
-                    if db is not None:
-                        st.session_state.db = db
-                        st.session_state.processed_docs = True
-                        st.session_state.db_status = "Vector database loaded successfully"
-                    else:
-                        st.session_state.processed_docs = False
-                        st.session_state.db_status = "Failed to load vector database"
-            
-            # Check if documents have been processed
-            if not st.session_state.processed_docs or st.session_state.db is None:
-                st.warning("Please process documents first in the Document Management tab")
-                # Add a button to process documents directly from this tab
-                if st.button("Process Documents Now"):
-                    with st.spinner("Processing documents..."):
-                        documents, new_docs = process_documents()
-                        if documents:
-                            st.session_state.documents = documents
-                            st.session_state.new_documents = new_docs
-                            db = create_vector_db(documents)
-                            if db:
-                                st.session_state.db = db
-                                st.success(f"Successfully processed {len(documents)} documents")
-                                st.rerun()  # Refresh the page
-                            else:
-                                st.error("Failed to create vector database")
-                        else:
-                            st.warning("No documents to process")
-                return
-            
-            # Query input
-            query = st.text_area("Enter your question:", height=100)
-            
-            # Query button for text search
-            if st.button("Search", key="text_search"):
-                if query:
-                    with st.spinner("Searching..."):
-                        # Get conversation history
-                        conversation_history = st.session_state.query_history[-5:] if st.session_state.query_history else []
-                        
-                        # Query documents
-                        results = query_documents(query, st.session_state.db, conversation_history)
-                        
-                        # Store results
-                        st.session_state.search_results = results
+    # Warning if no documents processed
+    if not st.session_state.get("processed_docs", False):
+        st.warning("No documents have been processed yet. Please go to Document Management to process some documents first.")
+        return
     
-    with input_tabs[1]:  # Food Image tab
-        st.markdown("""
-        <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; margin-bottom: 15px;">
-            <h3 style="color: #4CAF50; margin-top: 0;">🍽️ Food Image Analysis</h3>
-            <p style="color: white;">Upload an image of your food to get detailed nutritional information using AI.</p>
-        </div>
-        """, unsafe_allow_html=True)
-            
-        # Upload image
-        uploaded_file = st.file_uploader("Choose a food image...", type=["jpg", "jpeg", "png"])
-        
-        if uploaded_file is not None:
-            # Create columns for better layout
-            img_col, info_col = st.columns([1, 1])
-            
-            with img_col:
-                # Display the uploaded image with a border
-                image = Image.open(uploaded_file)
-                st.markdown("""
-                <div style="padding: 5px; border: 2px solid #4CAF50; border-radius: 10px; display: inline-block;">
-                """, unsafe_allow_html=True)
-                st.image(image, use_column_width=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-            
-            with info_col:
-                st.markdown("""
-                <div style="background-color: #1e1e1e; padding: 15px; border-radius: 10px; height: 100%;">
-                    <h4 style="color: #42A5F5; margin-top: 0;">How it works:</h4>
-                    <ul style="color: white;">
-                        <li>AI first verifies if the image contains food</li>
-                        <li>Then extracts detailed nutritional information</li>
-                        <li>Results are displayed with visual indicators</li>
-                        <li>Analysis is saved in your query history</li>
-                    </ul>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Process button with improved styling
-            st.markdown("""
-            <style>
-            div.stButton > button {
-                background-color: #4CAF50;
-                color: white;
-                font-weight: bold;
-                border: none;
-                padding: 0.5rem 1rem;
-                border-radius: 5px;
-            }
-            div.stButton > button:hover {
-                background-color: #45a049;
-            }
-            </style>
-            """, unsafe_allow_html=True)
-            if st.button("🔍 Analyze Food", key="analyze_food"):
-                with st.spinner("Analyzing your food image..."):
-                    # Process the food image
-                    success, message, macros = process_food_image(uploaded_file)
-                    if success:
-                        # Format and display the results
-                        format_macro_display(macros)
-                        
-                        # Add to query history and save
-                        st.session_state.query_history.append({
-                            "user": "[Food Image Analysis]",
-                            "assistant": message,
-                            "food_image": True,
-                            "macros": macros
-                        })
-                        save_query_history()
-                    else:
-                        st.error(message)
-
-    # Display results (outside both tabs)
-    if st.session_state.search_results:
-        st.subheader("Answer")
+    # Query input
+    query = st.text_input("Enter your question:", key="query_input")
+    
+    if query:
+        try:
+            with st.spinner("Processing your query..."):
+                # Process query with QA service
+                response = asyncio.run(qa_service.process_query(
+                    query=query,
+                    conversation_id=st.session_state.get("current_conversation_id"),
+                    max_sources=5
+                ))
                 
-        # Display accuracy percentage
-        if st.session_state.accuracy_percentage:
-            st.info(f"Response Confidence: {st.session_state.accuracy_percentage}%")
-        
-        # Display response
-        st.markdown(st.session_state.search_results["response"])
-        
-        # Display processing time
-        processing_time = st.session_state.search_results.get("processing_time", 0)
-        st.caption(f"Processing time: {processing_time:.2f} seconds")
-        
-        # Display sources with improved formatting
-        if st.session_state.search_results.get("sources"):
-            st.subheader("Sources")
-            sources = st.session_state.search_results["sources"]
-            chunks = st.session_state.search_results["chunks"]
+                # Store results
+                st.session_state["last_response"] = response
+                st.session_state["current_conversation_id"] = response["conversation_id"]
+                
+                # Display response
+                st.markdown("### Response")
+                st.write(response["answer"])
+                
+                # Display confidence and quality metrics
+                quality_check = response["metadata"]["quality_check"]
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Confidence", f"{quality_check['confidence_score']:.2%}")
+                with col2:
+                    st.metric("Completeness", "Complete" if quality_check["is_complete"] else "Incomplete")
+                
+                # Display sources
+                st.markdown("### Sources")
+                sources = response["sources"]
+                
+                # Group sources by type
+                doc_sources = [s for s in sources if s.get("metadata", {}).get("source_type") == "document"]
+                web_sources = [s for s in sources if s.get("metadata", {}).get("source_type") == "web"]
+                
+                # Display document sources
+                if doc_sources:
+                    st.markdown("#### Research Documents")
+                    for i, source in enumerate(doc_sources, 1):
+                        with st.expander(f"Document {i} (Score: {source['relevance_score']:.2f})"):
+                            st.markdown(f"**Source:** {source['source']}")
+                            st.markdown(f"**Content:** {source['chunk']}")
+                
+                # Display web sources
+                if web_sources:
+                    st.markdown("#### Web Sources")
+                    for i, source in enumerate(web_sources, 1):
+                        with st.expander(f"Web Source {i}"):
+                            st.markdown(f"**Title:** {source['title']}")
+                            st.markdown(f"**URL:** [{source['source']}]({source['source']})")
+                            st.markdown(f"**Domain:** {source['metadata']['domain']}")
+                            if source.get('chunk'):
+                                st.markdown(f"**Snippet:** {source['chunk']}")
+                
+                # Display quality check details
+                if not quality_check["is_complete"]:
+                    st.warning("The answer may be incomplete. Consider the following:")
+                    for element in quality_check["missing_elements"]:
+                        st.markdown(f"- {element}")
+                
+                if quality_check["needs_web_search"]:
+                    st.info("Additional information from web search has been included to provide a more complete answer.")
+                
+                # Display processing time
+                st.caption(f"Processed in {response['processing_time']:.2f} seconds")
             
-            # Only show chunks that contain actual content (not references)
-            for i, (source, chunk) in enumerate(zip(sources, chunks)):
-                # Skip if chunk appears to be just references
-                if any(ref_marker in chunk.lower() for ref_marker in ['[crossref]', '[pubmed]', 'references:', 'bibliography:']):
-                    continue
+            # Chat history in chat mode
+            if chat_mode:
+                st.markdown("### Conversation History")
+                history = qa_service.get_conversation_history(st.session_state["current_conversation_id"])
+                if history and history["exchanges"]:
+                    for exchange in history["exchanges"]:
+                        st.markdown(f"**User:** {exchange['user']}")
+                        st.markdown(f"**Assistant:** {exchange['assistant']}")
+                        st.markdown("---")
                     
-                # Extract title if present (format: "filename - title")
-                parts = source.split(' - ', 1)
-                filename = parts[0]
-                title = parts[1] if len(parts) > 1 else ''
+                    # Clear conversation button
+                    if st.button("Clear Conversation"):
+                        st.session_state["current_conversation_id"] = None
+                        st.session_state["chat_mode"] = False
+                        st.rerun()
                 
-                # Create expander with filename as header
-                with st.expander(f"{i+1}. {filename}"):
-                    if title:
-                        st.markdown(f"""<div style='padding: 10px; background-color: #1e1e1e; border-radius: 5px; margin-bottom: 10px;'>
-                        <span style='color: #4CAF50; font-weight: bold;'>Title:</span> 
-                        <span style='color: #ffffff;'>{title}</span>
-                    </div>""", unsafe_allow_html=True)
-                    
-                    # Show chunk content
-                    st.markdown(f"""<div style='padding: 10px; background-color: #1e1e1e; border-radius: 5px;'>
-                    <span style='color: #4CAF50; font-weight: bold;'>Content:</span><br>
-                    <span style='color: #ffffff; font-family: monospace;'>{chunk}</span>
-                </div>""", unsafe_allow_html=True)
-    
-    with col2:
-        # Query history
-        st.subheader("Query History")
-                
-        if st.session_state.query_history:
-            for i, exchange in enumerate(st.session_state.query_history):
-                # Customize display for food image analysis
-                if exchange.get('food_image', False):
-                    # Create a more visually appealing expander for food analysis
-                    with st.expander(f"🍽️ Food Analysis: {exchange.get('macros', {}).get('food_name', 'Unknown Food')}"):
-                        if 'macros' in exchange:
-                            # Display formatted macros with native Streamlit components
-                            format_macro_display(exchange['macros'])
-                        else:
-                            st.write(exchange["assistant"])
-                else:
-                    # Regular text query display
-                    with st.expander(f"Q{i+1}: {exchange['user'][:30]}..."):
-                        st.write("**Question:**")
-                        st.write(exchange["user"])
-                        st.write("**Answer:**")
-                        st.write(exchange["assistant"])
-        else:
-            st.info("No queries yet")
-        
-        # Clear history button
-        if st.button("Clear History"):
-            st.session_state.query_history = []
-            save_query_history()
-            st.success("Query history cleared")
+        except Exception as e:
+            st.error(f"Error processing query: {str(e)}")
+            logger.error(f"Error in search_query_ui: {str(e)}")
 
 if __name__ == "__main__":
     main()

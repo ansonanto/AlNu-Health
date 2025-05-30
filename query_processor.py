@@ -1,15 +1,14 @@
 import time
 import logging
 import streamlit as st
-# Using older OpenAI API style for compatibility with version 0.28.1
-from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain, ConversationChain
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from typing import List, Dict, Any, Optional
 
-from config import OPENAI_API_KEY, MODEL_NAME
+from gemini_llm import GeminiLLM
+from config import GEMINI_CONFIG, MODEL_NAME
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -202,9 +201,7 @@ def query_documents(query, db, conversation_history=None, is_summary_request=Fal
         )
         
         # Create LLM
-        llm = ChatOpenAI(
-            api_key=OPENAI_API_KEY,
-            model=MODEL_NAME,
+        llm = GeminiLLM(
             temperature=0.1
         )
         
