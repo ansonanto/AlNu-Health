@@ -33,8 +33,8 @@ USDA_API_KEY = st.secrets["usda"]["api_key"]
 EMAIL_ID = st.secrets["credentials"]["email"]
 
 # Vector store path
-VECTOR_STORE_PATH = Path("./vector_store")
-VECTOR_STORE_PATH.mkdir(parents=True, exist_ok=True)
+VECTOR_STORE_PATH = "./simple_vector_storage"
+os.makedirs(VECTOR_STORE_PATH, exist_ok=True)
 
 # Database path
 DB_PATH = Path(st.secrets["database"]["path"])

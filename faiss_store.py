@@ -207,61 +207,42 @@ class FAISSVectorStore:
                 progress_bar.progress(progress)
                 status_text.write(f"Generating embeddings: Batch {current_batch}/{total_batches}")
                 
+                # Generate embeddings for the batch
                 try:
-                    # Get embeddings for the batch
                     batch_embeddings = self.embedding_function.embed_documents(batch_chunks)
-                    
-                    # Verify all embeddings have the same dimension
-                    if batch_embeddings and len(batch_embeddings) > 0:
-                        first_dim = len(batch_embeddings[0])
-                        if first_dim != self.dimension:
-                            logger.warning(f"Embedding dimension mismatch: got {first_dim}, expected {self.dimension}")
-                            # Update the dimension if it's different
-                            if i == 0:  # Only update on first batch
-                                logger.info(f"Updating FAISS index dimension from {self.dimension} to {first_dim}")
-                                self.dimension = first_dim
-                                self.index = faiss.IndexFlatL2(self.dimension)
-                    
                     all_embeddings.extend(batch_embeddings)
-                    
-                    # Add a small delay between batches to avoid rate limits
-                    time.sleep(0.5)
                 except Exception as e:
                     logger.error(f"Error generating embeddings for batch {current_batch}: {str(e)}")
-                    # Skip this batch and continue with the next one
                     continue
+                
+                # Add to FAISS index and persist after each batch
+                try:
+                    embeddings_np = np.array(batch_embeddings).astype('float32')
+                    print(f"Batch {current_batch}: Embeddings shape: {embeddings_np.shape}")
+                    self.index.add(embeddings_np)
+                    # Store metadata for this batch
+                    batch_metadatas = all_metadatas[i:i+len(batch_embeddings)]
+                    self.metadata.extend(batch_metadatas)
+                    # Save to disk after each batch
+                    print(f"Batch {current_batch}: Calling _save_index()...")
+                    self._save_index()
+                    print(f"Batch {current_batch}: _save_index() called successfully.")
+                    print(f"Files in index_folder after saving batch {current_batch}:", os.listdir(self.index_folder))
+                except Exception as save_e:
+                    print(f"Exception during _save_index in batch {current_batch}: {save_e}")
+                    logger.error(f"Exception during _save_index in batch {current_batch}: {save_e}")
+
+            logger.info(f"Total chunks: {len(all_chunks)}, Total embeddings: {len(all_embeddings)}")
+            print(f"Total chunks: {len(all_chunks)}, Total embeddings: {len(all_embeddings)}")
             
-            # Check if we have any valid embeddings
-            if not all_embeddings:
-                logger.error("No valid embeddings generated")
-                progress_bar.progress(1.0)
-                status_text.write("❌ Failed to generate embeddings")
-                return
-                
-            # Convert to numpy array and add to FAISS index
-            try:
-                embeddings_np = np.array(all_embeddings).astype('float32')
-                self.index.add(embeddings_np)
-                
-                # Store metadata
-                self.metadata.extend(all_metadatas[:len(all_embeddings)])  # Only store metadata for successful embeddings
-                
-                # Save to disk
-                self._save_index()
-                
-                # Complete progress
-                progress_bar.progress(1.0)
-                status_text.write("✅ Processing complete!")
-                
-                logger.info(f"Added {len(all_embeddings)} chunks from {len(documents)} documents to vector store")
-            except Exception as e:
-                logger.error(f"Error adding embeddings to FAISS index: {str(e)}")
-                progress_bar.progress(1.0)
-                status_text.write("❌ Error adding embeddings to index")
-                raise
+            # Complete progress
+            progress_bar.progress(1.0)
+            status_text.write("✅ Processing complete!")
             
+            logger.info(f"Added {len(all_embeddings)} chunks from {len(documents)} documents to vector store")
         except Exception as e:
             logger.error(f"Error adding documents: {str(e)}")
+            print(f"Error adding documents: {str(e)}")
             progress_bar.progress(1.0)
             status_text.write(f"❌ Error: {str(e)}")
             raise

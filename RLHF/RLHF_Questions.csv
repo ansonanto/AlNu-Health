@@ -1,0 +1,42 @@
+,
+Category,Question
+Side Effects,"When I went up to [x]mg I had [xyz] side effect, is that normal? How do you recommend counteracting it?"
+Side Effects,"I'm having hair loss, what should I do?"
+Side Effects,"I'm feeling very tired, what should I do?"
+Side Effects,"My sleep is getting worse, what should I do?"
+Side Effects,"I am vomiting, what can I do?"
+Side Effects,"I have really bad constipation, what should I do"
+Side Effects,"I have bad acid reflux, what should I do?"
+Side Effects,"I'm getting bad abdominal cramping and have to run to the bathroom, is this normal?"
+Side Effects," I have really bad burping and gas, is this normal?"
+Titration," My side effects are increasingly bad, how do I know when to change my dose?"
+Titration," I missed a dose, what should I do?"
+Titration," I'm sick with a cold or GI bug, is it safe to continue taking?"
+Titration, My side effects are fine but my weight has plateaud. How do I know when to change my dose?
+Titration," I've stopped losing weight on the maximum dose, what should I do?"
+Titration, My weight loss feels too rapid. What should I do to make sure I'm not losing too much weight?
+Nutrition, How were my caloric and macro calorie goals calculated?
+Nutrition, What are some easy hacks to eat enough protein?
+Nutrition, What are some easy hacks to eat enough fiber?
+Nutrition, What can I do to prevent nutritional or Vitamin deficiencies?
+Nutrition, How much protein should I be eating?
+Nutrition, How much water should I drink?
+Nutrition, Can I drink alcohol?
+Nutrition, I'm worried I'm not eating enough. What should I do?
+Nutrition, What foods should I avoid while taking this medication?
+Activity, How much should I be working out? Should I focus more on cardio or strength training?
+Activity, What workouts are best for me and what is a customized workout plan for me?
+Nutrition, Are you going to give me a meal plan?
+Nutrition," I am really not hungry and can't eat without getting bad side effects, is this normal?"
+Insurance, How do I get this covered by my insurance that isn't covering it?
+Insurance, What are the other options if Insurance doesn't cover GLP1s?
+Lifestyle,Do you need to take GLP-1 medications for life?
+Lifestyle,What happens if I stop taking GLP-1 medications?
+Lifestyle,How should I handle questions from others about my medication?
+,
+Persona,Description
+1,Post menopausal woman 50+
+2,Young woman in late 20s - early 30s
+3,"Older man 60+ with central adiposity, heart disease, high blood pressure, high cholesterol "
+4,"Patients on medications (e.g., steroids, SSRI, anti-psychotics) that have gained weight and are having trouble losing it"
+5,"Patients with lots of obesity associated complications (e.g., T2D, Prediabetes)"

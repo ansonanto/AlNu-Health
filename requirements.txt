@@ -55,6 +55,7 @@ cryptography>=41.0.5
 
 # Food image analysis
 google-generativeai
+google-genai
 # Using Pillow version compatible with Streamlit and addressing CVEs
 Pillow>=10.2.0
 

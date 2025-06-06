@@ -90,7 +90,7 @@ def main():
         st.session_state.db_initialized = True
     
     # Display header
-    st.title("AlNu Health - Medical Research RAG System")
+    st.title("AlnuHealth - Medical Research RAG System")
     
     # Create tabs for different functionalities
     tabs = ["Document Management", "Search & Query", "PubMed Downloader", "Prompt Evaluator", "Keyword Availability"]

@@ -104,24 +104,19 @@ class GeminiEmbeddings(Embeddings):
             
             logger.info(f"Embedding {len(texts)} documents")
             embeddings = []
-            
             # Process each text individually as Gemini embedding API processes one at a time
             for i, text in enumerate(texts):
                 try:
                     embedding = self._embed_with_retry(text, task_type="retrieval_document")
                     embeddings.append(embedding)
-                    
                     # Log progress for large batches
                     if len(texts) > 10 and (i + 1) % 10 == 0:
                         logger.info(f"Embedded {i + 1}/{len(texts)} documents")
-                    
                 except Exception as e:
                     logger.error(f"Failed to embed document {i}: {str(e)}")
                     embeddings.append(self._get_fallback_embedding())
-            
             logger.info(f"Successfully embedded {len(embeddings)} documents")
             return embeddings
-            
         except Exception as e:
             logger.error(f"Error in embed_documents: {str(e)}")
             # Return fallback embeddings for all texts

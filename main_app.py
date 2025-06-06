@@ -4,10 +4,13 @@ import requests
 from datetime import datetime
 import re
 import json
+import os
+from document_processor import extract_text_from_pdf
+from datetime import datetime
 
 # Set page config - must be the first Streamlit command
 st.set_page_config(
-    page_title="AlNu Health - RAG Document Search System",
+    page_title="AlnuHealth - RAG Document Search System",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -97,8 +100,10 @@ def register_user(name, email, password):
             "user_id": {"stringValue": user_id}
         }
     }
-    resp2 = requests.post(FIRESTORE_USERS_URL, headers=headers, json=doc)
-    if resp2.status_code == 200:
+    # Use PATCH to set the document ID to user_id
+    user_doc_url = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/users/{user_id}"
+    resp2 = requests.patch(user_doc_url, headers=headers, json=doc)
+    if resp2.status_code in (200, 201):
         return True, "Registration successful!"
     else:
         return False, f"Registered, but failed to save user info: {resp2.text}"
@@ -115,14 +120,16 @@ def login_user(email, password):
     headers = {"Authorization": f"Bearer {id_token}"}
     r = requests.get(FIRESTORE_USERS_URL, headers=headers)
     name = None
+    user_doc_found = False
     if r.status_code == 200:
         docs = r.json().get("documents", [])
         for doc in docs:
             fields = doc.get("fields", {})
             if fields.get("user_id", {}).get("stringValue") == user_id:
                 name = fields.get("name", {}).get("stringValue")
+                user_doc_found = True
                 break
-    return True, "Login successful!", {"idToken": id_token, "localId": user_id, "name": name or ""}
+    return True, "Login successful!", {"idToken": id_token, "localId": user_id, "name": name or "", "user_doc_found": user_doc_found}
 
 def save_evaluation_firestore(id_token, user_id, evaluator_name, prompt, query, response, sources, rating, feedback):
     headers = {"Authorization": f"Bearer {id_token}"}
@@ -184,8 +191,10 @@ initialize_session_state()
 
 # Try to initialize the vector database on startup
 try:
+    # Debug print: list files in vector DB directory
+    print("Files in vector DB directory at startup:", os.listdir(VECTOR_STORE_PATH))
     # Check for existing vector store at startup
-    vector_store_path = Path("./simple_vector_storage")
+    vector_store_path = Path(VECTOR_STORE_PATH)
     if vector_store_path.exists() and (vector_store_path / "index.faiss").exists():
         logger.info("Found existing vector database, attempting to load")
         # Initialize the database
@@ -283,7 +292,10 @@ def show_auth():
                 else:
                     st.sidebar.error(msg)
     if st.session_state.get("logged_in"):
+        user_doc_found = st.session_state.get("user_doc_found", True)
         st.sidebar.success(f"Logged in as {st.session_state['evaluator_name']} ({st.session_state['email']})")
+        if not user_doc_found:
+            st.sidebar.warning("Your profile is missing. Please re-register or contact support.")
         if st.sidebar.button("Logout"):
             st.session_state.clear()
             st.rerun()
@@ -301,7 +313,7 @@ def main():
         load_query_history()
     
     # Display header
-    st.title("🏥 AlNu Health - Medical Research RAG System")
+    st.title("🏥 AlnuHealth - Medical Research RAG System")
     
     # Create tabs for different functionalities
     tabs = ["Document Management", "Search & Query", "PubMed Downloader", "Prompt Evaluator"]
@@ -319,7 +331,7 @@ def main():
     
     # Display footer
     st.markdown("---")
-    st.markdown("AlNu Health - Medical Research RAG System 2025")
+    st.markdown("AlnuHealth - Medical Research RAG System 2025")
 
 def load_organized_docs():
     if os.path.exists("organized_docs.json"):
@@ -336,11 +348,40 @@ if "organized_docs" not in st.session_state:
     st.session_state.organized_docs = load_organized_docs()
 
 def process_new_documents():
-    # Dummy vectorization step (replace with your actual vectorization logic)
-    for pdf_path in get_all_pdfs_from_results():
-        # Here you would extract text, create embeddings, and add to your vector DB
-        pass
-    st.success(f"Processed and vectorized {len(get_all_pdfs_from_results())} new documents.")
+    pdf_paths = get_all_pdfs_from_results()
+    documents = []
+    total = len(pdf_paths)
+    progress_bar = st.progress(0, text="Starting document processing...")
+    status_text = st.empty()
+    for i, pdf_path in enumerate(pdf_paths):
+        try:
+            status_text.info(f"Processing {os.path.basename(pdf_path)} ({i+1}/{total})...")
+            text = extract_text_from_pdf(pdf_path)
+            doc_info = {
+                "name": os.path.basename(pdf_path),
+                "content": text,
+                "path": pdf_path,
+                "metadata": {
+                    "source": os.path.basename(pdf_path),
+                    "upload_date": datetime.utcnow().isoformat(),
+                    "file_type": "pdf"
+                }
+            }
+            documents.append(doc_info)
+        except Exception as e:
+            st.error(f"Error processing {pdf_path}: {e}")
+        progress_bar.progress((i+1)/total, text=f"Processed {i+1}/{total} documents")
+    if documents:
+        status_text.info("Vectorizing documents...")
+        from vector_db import create_vector_db
+        create_vector_db(documents, update_existing=True)
+        progress_bar.progress(1.0, text="All documents processed and vectorized!")
+        st.success(f"Processed and vectorized {len(documents)} new documents.")
+        status_text.empty()
+    else:
+        progress_bar.progress(1.0, text="No documents were processed.")
+        st.warning("No documents were processed.")
+        status_text.empty()
 
 def organize_documents_with_gemini():
     api_key = st.secrets["api_keys"]["gemini"]
@@ -459,6 +500,74 @@ def document_management_ui():
         # Document upload section
         st.subheader("Document Upload")
         
+        # File uploader for direct upload and vectorization
+        uploaded_file = st.file_uploader("Upload a document (PDF, TXT)", type=['pdf', 'txt'])
+        if uploaded_file is not None:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            try:
+                temp_dir = "temp_uploads"
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                if uploaded_file.name.lower().endswith('.pdf'):
+                    from document_processor import extract_text_from_pdf
+                    text = extract_text_from_pdf(temp_path)
+                else:
+                    with open(temp_path, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                doc_info = {
+                    "name": uploaded_file.name,
+                    "content": text,
+                    "path": temp_path,
+                    "metadata": {
+                        "source": uploaded_file.name,
+                        "upload_date": datetime.utcnow().isoformat(),
+                        "file_type": uploaded_file.type
+                    }
+                }
+                progress_bar.progress(0.5)
+                status_text.write("Processing document...")
+                from vector_db import create_vector_db
+                vectorstore = create_vector_db([doc_info], update_existing=True)
+                if vectorstore:
+                    st.success(f"Successfully processed and added '{uploaded_file.name}' to the vector database!")
+                    os.remove(temp_path)
+                else:
+                    st.error("Failed to add document to vector database.")
+                progress_bar.progress(1.0)
+                status_text.write("✅ Processing complete!")
+            except Exception as e:
+                st.error(f"Error processing document: {str(e)}")
+                progress_bar.progress(1.0)
+                status_text.write("❌ Error processing document")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+        
+        # Vectorization status checker
+        with st.expander("Check Vectorization Status"):
+            results_dir = "results"
+            pdf_files = [f for f in os.listdir(results_dir) if f.lower().endswith('.pdf')]
+            vectorstore = st.session_state.get("vector_store") or st.session_state.get("db")
+            vectorized_docs = set()
+            if vectorstore is not None:
+                if hasattr(vectorstore, '_metadata'):
+                    for metadata in vectorstore._metadata:
+                        if metadata and 'source' in metadata:
+                            vectorized_docs.add(os.path.basename(metadata['source']))
+                elif hasattr(vectorstore, 'get'):
+                    all_docs = vectorstore.get()
+                    if all_docs and 'metadatas' in all_docs:
+                        for metadata in all_docs['metadatas']:
+                            if metadata and 'source' in metadata:
+                                vectorized_docs.add(os.path.basename(metadata['source']))
+            not_vectorized = [f for f in pdf_files if f not in vectorized_docs]
+            if not_vectorized:
+                st.warning(f"These files are not vectorized: {not_vectorized}")
+            else:
+                st.success("All files in the results folder are vectorized!")
+        
         # Display instructions
         st.markdown("""
         ### Instructions
@@ -466,7 +575,6 @@ def document_management_ui():
         2. Click 'Process Documents' to extract text and create embeddings
         3. Use the 'Search & Query' tab to ask questions about the documents
         """)
-        
         # Display last processed time
         if st.session_state.last_processed_time:
             last_processed = time.strftime(
@@ -500,15 +608,12 @@ def search_query_ui():
                     conversation_id=st.session_state.get("current_conversation_id"),
                     max_sources=5
                 ))
-                
                 # Store results
                 st.session_state["last_response"] = response
                 st.session_state["current_conversation_id"] = response["conversation_id"]
-                
                 # Display response
                 st.markdown("### Response")
                 st.write(response["answer"])
-                
                 # Display confidence and quality metrics
                 quality_check = response["metadata"]["quality_check"]
                 col1, col2 = st.columns(2)
@@ -516,15 +621,12 @@ def search_query_ui():
                     st.metric("Confidence", f"{quality_check['confidence_score']:.2%}")
                 with col2:
                     st.metric("Completeness", "Complete" if quality_check["is_complete"] else "Incomplete")
-                
                 # Display sources
                 st.markdown("### Sources")
                 sources = response["sources"]
-                
                 # Group sources by type
                 doc_sources = [s for s in sources if s.get("metadata", {}).get("source_type") == "document"]
                 web_sources = [s for s in sources if s.get("metadata", {}).get("source_type") == "web"]
-                
                 # Display document sources
                 if doc_sources:
                     st.markdown("#### Research Documents")
@@ -532,7 +634,6 @@ def search_query_ui():
                         with st.expander(f"Document {i} (Score: {source['relevance_score']:.2f})"):
                             st.markdown(f"**Source:** {source['source']}")
                             st.markdown(f"**Content:** {source['chunk']}")
-                
                 # Display web sources
                 if web_sources:
                     st.markdown("#### Web Sources")
@@ -543,35 +644,27 @@ def search_query_ui():
                             st.markdown(f"**Domain:** {source['metadata']['domain']}")
                             if source.get('chunk'):
                                 st.markdown(f"**Snippet:** {source['chunk']}")
-                
                 # Display quality check details
                 if not quality_check["is_complete"]:
                     st.warning("The answer may be incomplete. Consider the following:")
                     for element in quality_check["missing_elements"]:
                         st.markdown(f"- {element}")
-                
                 if quality_check["needs_web_search"]:
                     st.info("Additional information from web search has been included to provide a more complete answer.")
-                
-                # Display processing time
-                st.caption(f"Processed in {response['processing_time']:.2f} seconds")
-            
-            # Chat history in chat mode
-            if chat_mode:
-                st.markdown("### Conversation History")
-                history = qa_service.get_conversation_history(st.session_state["current_conversation_id"])
-                if history and history["exchanges"]:
-                    for exchange in history["exchanges"]:
-                        st.markdown(f"**User:** {exchange['user']}")
-                        st.markdown(f"**Assistant:** {exchange['assistant']}")
-                        st.markdown("---")
-                    
-                    # Clear conversation button
-                    if st.button("Clear Conversation"):
-                        st.session_state["current_conversation_id"] = None
-                        st.session_state["chat_mode"] = False
-                        st.rerun()
-                
+                # Chat history in chat mode
+                if chat_mode:
+                    st.markdown("### Conversation History")
+                    history = qa_service.get_conversation_history(st.session_state["current_conversation_id"])
+                    if history and history["exchanges"]:
+                        for exchange in history["exchanges"]:
+                            st.markdown(f"**User:** {exchange['user']}")
+                            st.markdown(f"**Assistant:** {exchange['assistant']}")
+                            st.markdown("---")
+                        # Clear conversation button
+                        if st.button("Clear Conversation"):
+                            st.session_state["current_conversation_id"] = None
+                            st.session_state["chat_mode"] = False
+                            st.rerun()
         except Exception as e:
             st.error(f"Error processing query: {str(e)}")
             logger.error(f"Error in search_query_ui: {str(e)}")

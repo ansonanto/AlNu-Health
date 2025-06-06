@@ -4,9 +4,10 @@ import logging
 import json
 from typing import List, Dict, Optional, Tuple, Any
 from datetime import datetime
-from google import genai
+import google.genai as genai
 from pathlib import Path
 from google.genai.types import GenerateContentConfig, GoogleSearch, Tool, EmbedContentConfig
+import os
 
 import streamlit as st
 from config import VECTOR_STORE_PATH
@@ -36,7 +37,14 @@ class QAService:
             # Initialize conversation history
             self.conversations: Dict[str, List[Dict]] = {}
             
-            # Initialize with default prompts
+            # Load the default prompt from prompt.md
+            prompt_path = os.path.join(os.path.dirname(__file__), "prompt.md")
+            if os.path.exists(prompt_path):
+                with open(prompt_path, "r") as f:
+                    self.COMBINED_TEMPLATE = f.read()
+            else:
+                self.COMBINED_TEMPLATE = """[Default prompt not found. Please add prompt.md]"""
+            
             self.QA_TEMPLATE = """
             You are an AI assistant specialized in medical and scientific research. 
             Answer the user's question based on the provided context from research papers.
@@ -73,32 +81,6 @@ class QAService:
             3. Be concise and accurate.
             4. Include relevant sources in your answer.
             5. For medical topics, include a disclaimer about consulting healthcare professionals.
-            
-            Answer:
-            """
-            
-            self.COMBINED_TEMPLATE = """
-            You are an AI assistant specialized in medical and scientific research.
-            Answer the user's question based on both the provided research documents and web search results.
-            
-            {conversation_context}
-            
-            Context from research documents:
-            {document_context}
-            
-            Context from web search:
-            {web_context}
-            
-            User Question: {question}
-            
-            Instructions:
-            1. Answer the question by combining information from both sources
-            2. Prioritize information from research documents for established medical knowledge
-            3. Use web search results for recent developments or additional context
-            4. Clearly indicate which information comes from which source
-            5. Be concise and accurate
-            6. For medical topics, include a disclaimer about consulting healthcare professionals
-            7. Cite sources appropriately using [doc1], [doc2], etc. for documents and [web1], [web2], etc. for web sources
             
             Answer:
             """

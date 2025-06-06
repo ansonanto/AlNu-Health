@@ -76,6 +76,9 @@ def initialize_vector_db(reset_db=False) -> Optional[FAISSVectorStore]:
 
 def create_vector_db(documents: List[Dict[str, Any]], update_existing: bool = False) -> bool:
     """Create or update vector database from documents"""
+    print("create_vector_db called with", len(documents), "documents")
+    for doc in documents[:5]:
+        print("Doc name:", doc.get('name'), "Content length:", len(doc.get('content', '')))
     try:
         # Initialize vector store
         vector_store = initialize_vector_db(reset_db=update_existing)
@@ -96,8 +99,11 @@ def create_vector_db(documents: List[Dict[str, Any]], update_existing: bool = Fa
                 metadata=metadata
             ))
 
-        # Add documents to vector store
+        print("Calling add_documents with", len(doc_objects), "documents")
         vector_store.add_documents(doc_objects, update_existing=update_existing)
+
+        # Debug print: list files in vector DB directory after processing
+        print("Files in vector DB directory after processing:", os.listdir(VECTOR_STORE_PATH))
 
         # Update session state
         st.session_state.db_status = "Vector database created successfully"
