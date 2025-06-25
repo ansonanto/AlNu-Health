@@ -13,6 +13,9 @@ from gemini_services import gemini_service
 from qa_service import QAService, qa_service
 from firebase_helpers import save_prompt_firestore, load_prompts_firestore, save_evaluation_firestore, fetch_evaluations_from_firestore, delete_evaluation_firestore
 import hashlib
+import pandas as pd
+import csv
+from collections import defaultdict
 
 from config import GEMINI_API_KEY, MODEL_NAME, PROMPTS_DIR, EVALUATIONS_DIR, GEMINI_CONFIG
 
@@ -43,7 +46,7 @@ def prompt_evaluator_ui():
     session = requests.Session()
     session.mount("https://", adapter)
     
-    tabs = st.tabs(["Test Prompts", "View Evaluations", "Persona Batch Evaluator", "View Batch Results"])
+    tabs = st.tabs(["Test Prompts", "View Evaluations", "Rewrite", "Persona Batch Evaluator", "View Batch Results"])
 
     # --- Test Prompts Tab ---
     with tabs[0]:
@@ -274,11 +277,296 @@ def prompt_evaluator_ui():
                         else:
                             st.error("Cannot delete: Firestore document ID not available.")
 
-    # --- Persona Batch Evaluator Tab ---
+    # --- Rewrite Tab ---
     with tabs[2]:
-        import pandas as pd
-        import csv
-        from collections import defaultdict
+        st.subheader("Rewrite Candidates (Avg Rating < 7)")
+        id_token = st.session_state.get("id_token")
+        if not id_token:
+            st.info("Please log in to view rewrite candidates.")
+        else:
+            # Fetch all batch results from Firestore (copied from View Batch Results tab)
+            FIRESTORE_BATCH_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/prompt_batch_evaluator"
+            headers = {"Authorization": f"Bearer {id_token}"}
+            def fetch_all_documents(url):
+                all_docs = []
+                next_page_token = None
+                while True:
+                    current_url = f"{url}?pageSize=100"
+                    if next_page_token:
+                        current_url += f"&pageToken={next_page_token}"
+                    resp = session.get(current_url, headers=headers)
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    docs = data.get("documents", [])
+                    all_docs.extend(docs)
+                    next_page_token = data.get("nextPageToken")
+                    if not next_page_token:
+                        break
+                return all_docs
+            batch_docs = fetch_all_documents(FIRESTORE_BATCH_URL)
+            all_results = []
+            for batch_doc in batch_docs:
+                batch_name = batch_doc.get("name", "").split("/")[-1]
+                results_url = f"{FIRESTORE_BATCH_URL}/{batch_name}/results"
+                results_docs = fetch_all_documents(results_url)
+                for doc in results_docs:
+                    fields = doc.get("fields", {})
+                    prompt_text = batch_doc.get("fields", {}).get("prompt_text", {}).get("stringValue", "Unknown Prompt")
+                    prompt_id = batch_doc.get("fields", {}).get("prompt_id", {}).get("stringValue", "")
+                    doc_id = doc.get("name", "").split("/")[-1]
+                    try:
+                        evals = json.loads(fields.get("evaluations", {}).get("stringValue", "[]"))
+                    except Exception:
+                        evals = []
+                    # Parse rewrites field robustly
+                    rewrites = [
+                        v.get("stringValue", "")
+                        for v in fields.get("rewrites", {}).get("arrayValue", {}).get("values", [])
+                    ]
+                    item = {
+                        'doc_id': doc_id,
+                        'batch_name': batch_name,
+                        'prompt_id': prompt_id,
+                        'prompt_text': prompt_text,
+                        'persona': fields.get("persona", {}).get("stringValue", ""),
+                        'category': fields.get("category", {}).get("stringValue", ""),
+                        'question': fields.get("question", {}).get("stringValue", ""),
+                        'query': fields.get("query", {}).get("stringValue", ""),
+                        'response': fields.get("response", {}).get("stringValue", ""),
+                        'sources': fields.get("sources", {}).get("stringValue", ""),
+                        'quality_check': fields.get("quality_check", {}).get("stringValue", ""),
+                        'evaluations': evals,
+                        'rewrites': rewrites,
+                        'last_rewrite_by_id': fields.get("last_rewrite_by_id", {}).get("stringValue", ""),
+                        'last_rewrite_by_name': fields.get("last_rewrite_by_name", {}).get("stringValue", ""),
+                        'last_rewrite_at': fields.get("last_rewrite_at", {}).get("timestampValue", "")
+                    }
+                    all_results.append(item)
+            # Aggregate and filter for avg rating < 7
+            df_data = []
+            for result in all_results:
+                evals = result['evaluations']
+                eval_count = 0
+                evaluator_names = []
+                ratings = []
+                if isinstance(evals, list):
+                    for ev in evals:
+                        if isinstance(ev, dict):
+                            eval_count += 1
+                            name = ev.get('evaluator', ev.get('evaluator_name', 'Unknown'))
+                            if name and name != 'Unknown':
+                                evaluator_names.append(str(name))
+                            if 'rating' in ev:
+                                try:
+                                    ratings.append(float(ev['rating']))
+                                except:
+                                    pass
+                avg_rating = sum(ratings)/len(ratings) if ratings else None
+                if avg_rating is not None and avg_rating < 7:
+                    # Determine rewrite status for current user based on rewrites array
+                    import json as _json
+                    user_id_val = st.session_state.get("user_id", "")
+                    user_name_val = st.session_state.get("evaluator_name", "")
+                    user_has_rewrite = False
+                    for r in result.get('rewrites', []):
+                        try:
+                            r_obj = _json.loads(r)
+                            if (
+                                r_obj.get("rewritten_by_id") == user_id_val and
+                                r_obj.get("rewritten_by_name") == user_name_val
+                            ):
+                                user_has_rewrite = True
+                                break
+                        except Exception:
+                            continue
+                    if user_has_rewrite:
+                        status_label = "✅ Yours"
+                    else:
+                        status_label = "❌ Pending"
+                    df_data.append({
+                        'Select': False,
+                        'Batch ID': result['batch_name'],
+                        'Category': result['category'],
+                        'Evaluations': eval_count,
+                        'Evaluators': ", ".join(sorted(set(evaluator_names))) if evaluator_names else "N/A",
+                        'Avg Rating': f"{avg_rating:.1f}" if avg_rating is not None else "N/A",
+                        'Status': status_label,
+                        'Query Preview': result['query'][:80] + '...' if len(result['query']) > 80 else result['query'],
+                        'all_evals': evals,
+                        'full_result': result
+                    })
+            if not df_data:
+                st.info("No batch results found with average rating less than 7.")
+            else:
+                df = pd.DataFrame(df_data)
+                st.write("Click the checkbox in the 'Select' column to view details for that row:")
+                edited_df = st.data_editor(
+                    df.drop(columns=['all_evals', 'full_result']),
+                    column_config={
+                        "Select": st.column_config.CheckboxColumn(
+                            "Select",
+                            help="Select this row to view detailed evaluations",
+                            default=False,
+                        )
+                    },
+                    disabled=["Batch ID", "Category", "Evaluations", "Evaluators", "Avg Rating", "Query Preview", "Status"],
+                    use_container_width=True,
+                    key="rewrite_results_table"
+                )
+                selected_rows = edited_df[edited_df['Select'] == True]
+                if not selected_rows.empty:
+                    st.markdown("---")
+                    st.subheader("Selected Result Details")
+                    for idx in selected_rows.index:
+                        if idx < len(df_data):
+                            row = df_data[idx]
+                            result = row['full_result']
+                            st.markdown(f"### Batch: {result['batch_name']} | Category: {result['category']} | Persona: {result['persona']}")
+                            st.markdown(f"**Query:** {result['query']}")
+                            # --- Current response & rewrite box ---
+                            st.markdown("**Current Response:**")
+                            st.info(result['response'])
+
+                            # --- Show evaluations BEFORE rewrite box ---
+                            st.markdown("### Evaluations")
+                            if row['all_evals']:
+                                for i, ev in enumerate(row['all_evals'], start=1):
+                                    rating_val = ev.get('rating', 'N/A')
+                                    evaluator_nm = ev.get('evaluator_name', ev.get('evaluator', 'Unknown'))
+                                    ts = ev.get('timestamp', '')
+                                    st.markdown(f"**Evaluation {i} — {evaluator_nm} | Rating: {rating_val}/10 | {ts}**")
+                                    if ev.get('feedback', ''):
+                                        st.info(ev['feedback'])
+                                    st.markdown("---")
+
+                            # --- Rewrite UI logic ---
+                            import json as _json
+                            user_id_val = st.session_state.get("user_id", "")
+                            user_rewrite = None
+                            all_rewrites = result.get("rewrites", [])
+                            for r in all_rewrites:
+                                try:
+                                    r_obj = _json.loads(r)
+                                    if r_obj.get("rewritten_by_id") == user_id_val:
+                                        user_rewrite = r_obj
+                                except Exception:
+                                    continue
+
+                            if user_rewrite:
+                                st.markdown("### ✏️ Your Rewrite (uneditable)")
+                                st.info(user_rewrite.get("rewritten_response", ""))
+                                if st.button("🗑️ Delete My Rewrite", key=f"delete_rewrite_{result['doc_id']}"):
+                                    FIRESTORE_BATCH_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/prompt_batch_evaluator"
+                                    FIRESTORE_BATCH_RESULT_DOC_URL = f"{FIRESTORE_BATCH_URL}/{result['batch_name']}/results/{result['doc_id']}"
+                                    headers = {"Authorization": f"Bearer {id_token}"}
+                                    # Get the current document
+                                    cur_doc_resp = session.get(FIRESTORE_BATCH_RESULT_DOC_URL, headers=headers)
+                                    if cur_doc_resp.status_code == 200:
+                                        cur_fields = cur_doc_resp.json().get("fields", {})
+                                        rewrites_raw = cur_fields.get("rewrites", {}).get("arrayValue", {}).get("values", [])
+                                        rewrites_list = [v.get("stringValue", "") for v in rewrites_raw]
+                                        # Remove ALL entries authored by this user
+                                        filtered_list = []
+                                        for r in rewrites_list:
+                                            try:
+                                                r_obj = _json.loads(r)
+                                            except Exception:
+                                                r_obj = {}
+                                            if r_obj.get("rewritten_by_id") != user_id_val:
+                                                filtered_list.append(r)
+                                        rewrites_list = filtered_list
+                                        # Determine new top-level response/summary
+                                        if rewrites_list:
+                                            last_json = _json.loads(rewrites_list[-1])
+                                            new_by_id = last_json.get("rewritten_by_id", "")
+                                            new_by_name = last_json.get("rewritten_by_name", "")
+                                            new_at = last_json.get("rewritten_at", "")
+                                        else:
+                                            new_by_id = ""
+                                            new_by_name = ""
+                                            new_at = ""
+                                        patch_fields = dict(cur_fields)
+                                        patch_fields["last_rewrite_by_id"] = {"stringValue": new_by_id}
+                                        patch_fields["last_rewrite_by_name"] = {"stringValue": new_by_name}
+                                        patch_fields["last_rewrite_at"] = {"timestampValue": new_at} if new_at else {"nullValue": None}
+                                        patch_fields["rewrites"] = {
+                                            "arrayValue": {
+                                                "values": [{"stringValue": r} for r in rewrites_list]
+                                            }
+                                        }
+                                        patch_doc = {"fields": patch_fields}
+                                        patch_resp = session.patch(FIRESTORE_BATCH_RESULT_DOC_URL, headers=headers, json=patch_doc)
+                                        if patch_resp.status_code in (200, 201):
+                                            st.success("Your latest rewrite was deleted.")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Failed to delete rewrite: {patch_resp.text}")
+                                    else:
+                                        st.error("Failed to fetch current document to delete rewrite.")
+                            else:
+                                new_response = st.text_area(
+                                    label="✏️ Rewrite the response",
+                                    value=result['response'],
+                                    height=200,
+                                    key=f"rewrite_text_{result['doc_id']}"
+                                )
+                                if st.button("💾 Save Rewrite", key=f"save_rewrite_{result['doc_id']}"):
+                                    FIRESTORE_BATCH_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/prompt_batch_evaluator"
+                                    FIRESTORE_BATCH_RESULT_DOC_URL = f"{FIRESTORE_BATCH_URL}/{result['batch_name']}/results/{result['doc_id']}"
+                                    headers = {"Authorization": f"Bearer {id_token}"}
+                                    from datetime import datetime as _dt
+                                    try:
+                                        current_doc = session.get(FIRESTORE_BATCH_RESULT_DOC_URL, headers=headers).json()
+                                        current_fields = current_doc.get("fields", {})
+                                        if "rewrites" in current_fields and "arrayValue" in current_fields["rewrites"]:
+                                            existing_rewrites_raw = current_fields["rewrites"]["arrayValue"].get("values", [])
+                                        else:
+                                            existing_rewrites_raw = []
+                                        existing_rewrites = []
+                                        for v in existing_rewrites_raw:
+                                            if "stringValue" in v:
+                                                existing_rewrites.append(v["stringValue"])
+                                            elif "mapValue" in v:
+                                                import json as _json
+                                                existing_rewrites.append(_json.dumps(v["mapValue"]["fields"]))
+                                    except Exception:
+                                        existing_rewrites = []
+                                    user_id_val = st.session_state.get("user_id", "")
+                                    user_name_val = st.session_state.get("evaluator_name", "")
+                                    history_entry = json.dumps({
+                                        "rewritten_response": new_response,
+                                        "rewritten_by_id": user_id_val,
+                                        "rewritten_by_name": user_name_val,
+                                        "rewritten_at": _dt.utcnow().isoformat() + "Z"
+                                    })
+                                    existing_rewrites.append(history_entry)
+                                    patch_fields = dict(current_fields)
+                                    patch_fields["last_rewrite_by_id"] = {"stringValue": user_id_val}
+                                    patch_fields["last_rewrite_by_name"] = {"stringValue": user_name_val}
+                                    patch_fields["last_rewrite_at"] = {"timestampValue": _dt.utcnow().isoformat() + "Z"}
+                                    patch_fields["rewrites"] = {
+                                        "arrayValue": {
+                                            "values": [{"stringValue": r} for r in existing_rewrites]
+                                        }
+                                    }
+                                    patch_doc = {"fields": patch_fields}
+                                    patch_resp = session.patch(
+                                        FIRESTORE_BATCH_RESULT_DOC_URL,
+                                        headers=headers,
+                                        json=patch_doc
+                                    )
+                                    if patch_resp.status_code in (200, 201):
+                                        st.success("Rewritten response saved successfully!")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to save rewrite: {patch_resp.text}")
+                            st.markdown("---")
+                else:
+                    st.info("Select a row using the checkbox in the 'Select' column to view detailed evaluations.")
+
+    # --- Persona Batch Evaluator Tab ---
+    with tabs[3]:
         # Load RLHF_Questions.csv
         questions = []
         personas = []
@@ -507,7 +795,7 @@ def prompt_evaluator_ui():
                         st.markdown("---")
 
     # --- View Batch Results Tab ---
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("View Batch Results")
         id_token = st.session_state.get("id_token")
         user_id = st.session_state.get("user_id")
@@ -573,6 +861,11 @@ def prompt_evaluator_ui():
                 except Exception:
                     evals = []
                 
+                # Parse rewrites field robustly
+                rewrites = [
+                    v.get("stringValue", "")
+                    for v in fields.get("rewrites", {}).get("arrayValue", {}).get("values", [])
+                ]
                 item = {
                     'doc_id': doc_id,
                     'batch_name': batch_name,
@@ -586,7 +879,10 @@ def prompt_evaluator_ui():
                     'sources': fields.get("sources", {}).get("stringValue", ""),
                     'quality_check': fields.get("quality_check", {}).get("stringValue", ""),
                     'evaluations': evals,
-                    'status': "✅" if evals else "❌"
+                    'rewrites': rewrites,
+                    'last_rewrite_by_id': fields.get("last_rewrite_by_id", {}).get("stringValue", ""),
+                    'last_rewrite_by_name': fields.get("last_rewrite_by_name", {}).get("stringValue", ""),
+                    'last_rewrite_at': fields.get("last_rewrite_at", {}).get("timestampValue", "")
                 }
                 all_results.append(item)
 

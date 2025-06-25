@@ -4,9 +4,8 @@ import logging
 import json
 from typing import List, Dict, Optional, Tuple, Any
 from datetime import datetime
-import google.genai as genai
+import google.generativeai as genai
 from pathlib import Path
-from google.genai.types import GenerateContentConfig, GoogleSearch, Tool, EmbedContentConfig
 import os
 
 import streamlit as st
@@ -20,9 +19,10 @@ class QAService:
     def __init__(self):
         """Initialize QA service with Gemini client and vector store"""
         try:
-            # Initialize Gemini client with API key
-            self.client = genai.Client(api_key=st.secrets["api_keys"]["gemini"])
+            # Configure Gemini API key
+            genai.configure(api_key=st.secrets["api_keys"]["gemini"])
             self.model_name = st.secrets["settings"]["default_model"]
+            self.model = genai.GenerativeModel(self.model_name)
             self.embedding_model = "embedding-001"
             self.embedding_dimension = 768  # Gemini embeddings have 768 dimensions by default
             
@@ -154,10 +154,7 @@ class QAService:
             )
             
             # Get evaluation from Gemini
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt
-            )
+            response = self.model.generate_content(prompt)
             
             # Clean and parse the JSON response
             response_text = response.text.strip()
@@ -222,13 +219,10 @@ class QAService:
                     conversation_context=conversation_context
                 )
                 
-                response = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=GenerateContentConfig(
-                        tools=[Tool(google_search=GoogleSearch())],
-                        temperature=0.0
-                    )
+                response = self.model.generate_content(
+                    prompt,
+                    tools=[{"google_search": {}}],
+                    generation_config={"temperature": 0.0}
                 )
                 
                 answer = response.text
@@ -374,15 +368,13 @@ class QAService:
         try:
             # Get query embedding using the embedding model
             try:
-                response = self.client.models.embed_content(
+                response = genai.embed_content(
                     model=self.embedding_model,
-                    contents=query,
-                    config=EmbedContentConfig(
-                        task_type="RETRIEVAL_QUERY",
-                        output_dimensionality=self.embedding_dimension
-                    )
+                    content=query,
+                    task_type="retrieval_query",
+                    output_dimensionality=self.embedding_dimension
                 )
-                query_embedding = response.embeddings[0].values
+                query_embedding = response['embedding']
             except Exception as e:
                 if "503" in str(e):
                     logger.error("Model overloaded (503), please try again later")
@@ -444,15 +436,14 @@ class QAService:
                 )
             
             # Generate response
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=GenerateContentConfig(
-                    temperature=0.0,
-                    top_p=0.95,
-                    top_k=0,
-                    max_output_tokens=2048
-                )
+            response = self.model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.0,
+                    "top_p": 0.95,
+                    "top_k": 0,
+                    "max_output_tokens": 2048
+                }
             )
             answer = response.text
             
